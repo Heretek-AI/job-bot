@@ -1,6 +1,4 @@
 import crypto from "node:crypto";
-import fs from "node:fs";
-import path from "node:path";
 import type { Pool } from "pg";
 
 export interface AtsCredentialRecord {
@@ -229,30 +227,13 @@ export function decryptPassword(
 }
 
 /**
- * Resolves the JobPilot API bearer token from JOBPILOT_API_TOKEN env var or the
- * terminal host's paired pilot.json file (/root/.jobpilot/pilot.json).
+ * Resolves the JobPilot API bearer token from the JOBPILOT_API_TOKEN environment variable
+ * injected by the JobPilot Terminal Host PTY session (or .env override).
  */
 export function resolveJobPilotApiToken(): string | null {
   const envToken = process.env.JOBPILOT_API_TOKEN?.trim();
-  if (envToken) {
+  if (envToken && /^[A-Za-z0-9._~+/=-]{8,512}$/.test(envToken)) {
     return envToken;
-  }
-
-  const installDir = process.env.JOBPILOT_INSTALL_DIR || "/root/.jobpilot";
-  const pilotJsonPath = path.join(installDir, "pilot.json");
-  try {
-    if (fs.existsSync(pilotJsonPath)) {
-      const raw = JSON.parse(fs.readFileSync(pilotJsonPath, "utf8")) as {
-        apiToken?: string;
-        token?: string;
-      };
-      const fileToken = (raw.apiToken || raw.token || "").trim();
-      if (fileToken) {
-        return fileToken;
-      }
-    }
-  } catch {
-    // Ignore unreadable pilot.json
   }
   return null;
 }
@@ -266,10 +247,17 @@ export async function syncCredentialToJobPilotApi(params: {
   email: string;
   password: string;
 }): Promise<boolean> {
-  const apiUrl = (process.env.JOBPILOT_API || "http://api:4101").replace(
-    /\/+$/,
-    ""
-  );
+  let apiOrigin: string;
+  try {
+    const parsedUrl = new URL(process.env.JOBPILOT_API || "http://api:4101");
+    if (parsedUrl.protocol !== "http:" && parsedUrl.protocol !== "https:") {
+      return false;
+    }
+    apiOrigin = parsedUrl.origin;
+  } catch {
+    return false;
+  }
+
   const apiToken = resolveJobPilotApiToken();
   if (!apiToken) {
     return false;
@@ -282,7 +270,7 @@ export async function syncCredentialToJobPilotApi(params: {
 
   try {
     const resolveResp = await fetch(
-      `${apiUrl}/api/credentials/resolve?domain=${encodeURIComponent(
+      `${apiOrigin}/api/credentials/resolve?domain=${encodeURIComponent(
         params.hostname
       )}`,
       { headers, signal: AbortSignal.timeout(10_000) }
@@ -293,7 +281,7 @@ export async function syncCredentialToJobPilotApi(params: {
       };
       if (body?.data?.id && body.data.kind === "board") {
         const patchResp = await fetch(
-          `${apiUrl}/api/credentials/${encodeURIComponent(body.data.id)}`,
+          `${apiOrigin}/api/credentials/${encodeURIComponent(body.data.id)}`,
           {
             method: "PATCH",
             headers,
@@ -308,7 +296,7 @@ export async function syncCredentialToJobPilotApi(params: {
       }
     }
 
-    const createResp = await fetch(`${apiUrl}/api/credentials`, {
+    const createResp = await fetch(`${apiOrigin}/api/credentials`, {
       method: "POST",
       headers,
       body: JSON.stringify({

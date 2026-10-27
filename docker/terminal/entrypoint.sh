@@ -136,6 +136,25 @@ install_dir = os.environ.get("JOBPILOT_INSTALL_DIR", "/root/.jobpilot")
 mcp_path = os.path.join(install_dir, "plugin", ".mcp.json")
 cdp_url = os.environ.get("CLOAKBROWSER_CDP_URL", "http://cloakbrowser:9222")
 
+mcp_env = {
+    "DATABASE_URL": os.environ.get("DATABASE_URL", ""),
+    "JOBPILOT_API": os.environ.get("JOBPILOT_API", "http://api:4101"),
+    "JOBPILOT_INSTALL_DIR": install_dir,
+    "GMAIL_ADDRESS": os.environ.get("GMAIL_ADDRESS", ""),
+    "GMAIL_APP_PASSWORD": os.environ.get("GMAIL_APP_PASSWORD", ""),
+    "GMAIL_IMAP_HOST": os.environ.get("GMAIL_IMAP_HOST", "imap.gmail.com"),
+    "GMAIL_IMAP_PORT": os.environ.get("GMAIL_IMAP_PORT", "993"),
+    "ATS_VAULT_MASTER_SECRET": os.environ.get("ATS_VAULT_MASTER_SECRET", ""),
+    "ATS_DEFAULT_PASSWORD_PREFIX": os.environ.get("ATS_DEFAULT_PASSWORD_PREFIX", "JobBot#2026!"),
+    "CLOAKBROWSER_CDP_URL": cdp_url,
+    "CAPSOLVER_API_KEY": os.environ.get("CAPSOLVER_API_KEY", ""),
+    "TWOCAPTCHA_API_KEY": os.environ.get("TWOCAPTCHA_API_KEY", ""),
+    "CAREER_OPS_DIR": "/opt/career-ops",
+    "SHARED_RESUMES_DIR": "/app/shared/resumes"
+}
+if os.environ.get("JOBPILOT_API_TOKEN", "").strip():
+    mcp_env["JOBPILOT_API_TOKEN"] = os.environ["JOBPILOT_API_TOKEN"].strip()
+
 mcp_servers = {
     "playwright": {
         "command": "playwright-mcp",
@@ -149,23 +168,7 @@ mcp_servers = {
     "jobbot-mcp": {
         "command": "node",
         "args": ["/opt/jobbot-mcp/dist/index.js"],
-        "env": {
-            "DATABASE_URL": os.environ.get("DATABASE_URL", ""),
-            "JOBPILOT_API": os.environ.get("JOBPILOT_API", "http://api:4101"),
-            "JOBPILOT_API_TOKEN": os.environ.get("JOBPILOT_API_TOKEN", ""),
-            "JOBPILOT_INSTALL_DIR": install_dir,
-            "GMAIL_ADDRESS": os.environ.get("GMAIL_ADDRESS", ""),
-            "GMAIL_APP_PASSWORD": os.environ.get("GMAIL_APP_PASSWORD", ""),
-            "GMAIL_IMAP_HOST": os.environ.get("GMAIL_IMAP_HOST", "imap.gmail.com"),
-            "GMAIL_IMAP_PORT": os.environ.get("GMAIL_IMAP_PORT", "993"),
-            "ATS_VAULT_MASTER_SECRET": os.environ.get("ATS_VAULT_MASTER_SECRET", ""),
-            "ATS_DEFAULT_PASSWORD_PREFIX": os.environ.get("ATS_DEFAULT_PASSWORD_PREFIX", "JobBot#2026!"),
-            "CLOAKBROWSER_CDP_URL": cdp_url,
-            "CAPSOLVER_API_KEY": os.environ.get("CAPSOLVER_API_KEY", ""),
-            "TWOCAPTCHA_API_KEY": os.environ.get("TWOCAPTCHA_API_KEY", ""),
-            "CAREER_OPS_DIR": "/opt/career-ops",
-            "SHARED_RESUMES_DIR": "/app/shared/resumes"
-        }
+        "env": mcp_env
     },
     "upwork": {
         "type": "http",
