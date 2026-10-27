@@ -2,6 +2,7 @@
 -- ATS Multi-Tenant Credential Vault & Gmail IMAP Sync Tables
 -- Initialized automatically on first Postgres startup alongside JobPilot tables
 -- ============================================================================
+SET client_min_messages TO WARNING;
 
 CREATE TABLE IF NOT EXISTS ats_credentials (
     id SERIAL PRIMARY KEY,
