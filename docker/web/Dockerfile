@@ -21,7 +21,7 @@ RUN DATABASE_URL="postgresql://build:build@localhost:5432/build" bun run db:gene
 WORKDIR /app/apps/web
 RUN bun run build
 
-FROM node:22-alpine AS runner
+FROM node:26-alpine AS runner
 WORKDIR /app
 ENV NODE_ENV=production
 

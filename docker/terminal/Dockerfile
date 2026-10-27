@@ -5,7 +5,7 @@ ENV JOBPILOT_DIST_DIR=/opt/jobpilot-dist
 ENV JOBPILOT_INSTALL_DIR=/root/.jobpilot
 ENV PATH="/root/.jobpilot:/root/.local/bin:/root/.bun/bin:${PATH}"
 
-# 1. System dependencies + Node.js 22 + Python 3 + ICU/libssl for .NET NativeAOT binary
+# 1. System dependencies + Node.js 26 + Python 3 + ICU/libssl for .NET NativeAOT binary
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     curl \
@@ -19,7 +19,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libicu74 \
     libssl3t64 \
     procps \
-    && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+    && curl -fsSL https://deb.nodesource.com/setup_26.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
     && rm -rf /var/lib/apt/lists/*
 
@@ -28,7 +28,7 @@ RUN curl -fsSL https://bun.sh/install | bash \
     && curl -LsSf https://astral.sh/uv/install.sh | sh
 
 # 3. Install pinned Claude Code CLI & Playwright MCP globally
-RUN npm install -g @anthropic-ai/claude-code@2.0.35 @playwright/mcp@0.0.68
+RUN npm install -g @anthropic-ai/claude-code@2.1.312 @playwright/mcp@0.0.83
 
 # 4. Install JobPilot Terminal Host binary + bundled plugin/ outside the /root/.jobpilot volume
 # so container image upgrades never get shadowed by the persistent terminal-data volume.
