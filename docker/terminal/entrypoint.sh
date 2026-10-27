@@ -162,6 +162,44 @@ print(f"[terminal] Configured OpenCode Claude Code harness ({opencode_env['ANTHR
       f"opus={opencode_env['ANTHROPIC_DEFAULT_OPUS_MODEL']}, "
       f"sonnet={opencode_env['ANTHROPIC_DEFAULT_SONNET_MODEL']}, "
       f"haiku={opencode_env['ANTHROPIC_DEFAULT_HAIKU_MODEL']}")
+
+# Ensure /root/.claude.json is pre-seeded (and restored from /root/.claude/backups if container was recreated)
+# so Claude Code never shows the interactive theme onboarding wizard or workspace/MCP trust prompts.
+import glob
+
+claude_json_path = "/root/.claude.json"
+persisted_json_path = "/root/.claude/.claude.json"
+state = {}
+
+for candidate in [claude_json_path, persisted_json_path] + sorted(glob.glob("/root/.claude/backups/.claude.json.backup.*"), reverse=True):
+    if os.path.exists(candidate):
+        try:
+            with open(candidate, "r", encoding="utf-8") as f:
+                loaded = json.load(f)
+            if isinstance(loaded, dict) and loaded:
+                state = loaded
+                break
+        except Exception:
+            pass
+
+state["hasCompletedOnboarding"] = True
+state["theme"] = state.get("theme", "dark")
+state["numStartups"] = max(int(state.get("numStartups", 1)), 1)
+projects = state.get("projects")
+if not isinstance(projects, dict):
+    projects = {}
+proj = projects.get(install_dir)
+if not isinstance(proj, dict):
+    proj = {}
+proj["hasTrustDialogAccepted"] = True
+proj["enabledMcpjsonServers"] = ["playwright", "jobbot-mcp"]
+projects[install_dir] = proj
+state["projects"] = projects
+
+for dest in (claude_json_path, persisted_json_path):
+    with open(dest, "w", encoding="utf-8") as f:
+        json.dump(state, f, indent=2)
+    os.chmod(dest, 0o600)
 PY
 
 # 3. Wire plugin/.mcp.json to CloakBrowser C++ Stealth Chromium over CDP + jobbot-mcp + optional Invisible Playwright Firefox
