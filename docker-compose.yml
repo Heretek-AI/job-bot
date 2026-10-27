@@ -93,7 +93,7 @@ services:
       NODE_ENV: production
       PORT: 4101
       DATABASE_URL: ${DATABASE_URL:-postgresql://${POSTGRES_USER:-jobpilot}:${POSTGRES_PASSWORD:-jobpilot_secret_password}@postgres:5432/${POSTGRES_DB:-jobpilot}}
-      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:8080,http://127.0.0.1:8080,http://localhost:4100}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:8080,http://127.0.0.1:8080,http://localhost:4100,http://web:4100}
       APP_URL: ${APP_URL:-http://localhost:8080}
     ports:
       - "127.0.0.1:${API_PORT:-4101}:4101"
