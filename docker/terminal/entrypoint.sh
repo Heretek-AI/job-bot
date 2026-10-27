@@ -148,9 +148,9 @@ for target_path, default_root in (
         "Task",
         "Skill",
         "NotebookEdit",
-        "mcp__*",
         "mcp__playwright__*",
         "mcp__jobbot-mcp__*",
+        "mcp__invisible-firefox__*",
     ]
     cfg["permissions"] = perms
 
