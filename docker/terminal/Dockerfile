@@ -51,7 +51,8 @@ RUN npm run build
 
 # 7. Copy container entrypoint
 COPY docker/terminal/entrypoint.sh /usr/local/bin/terminal-entrypoint.sh
-RUN chmod +x /usr/local/bin/terminal-entrypoint.sh \
+RUN sed -i 's/\r$//' /usr/local/bin/terminal-entrypoint.sh \
+    && chmod +x /usr/local/bin/terminal-entrypoint.sh \
     && mkdir -p /app/shared/resumes /root/.claude /root/.jobpilot
 
 WORKDIR /root/.jobpilot

@@ -10,7 +10,12 @@ for var in SUPER_ADMIN_EMAIL GOOGLE_CLIENT_ID GOOGLE_CLIENT_SECRET GITHUB_CLIENT
 done
 
 # 2. Ensure SECRET_MASTER_KEY is a valid 32-byte base64 key (auto-generate & persist if left at placeholder)
-KEY_LEN=$(bun -e "try { const k = process.env.SECRET_MASTER_KEY || ''; console.log(k.startsWith('REPLACE_') ? 0 : Buffer.from(k, 'base64').length); } catch { console.log(0); }")
+KEY_LEN=0
+case "${SECRET_MASTER_KEY:-}" in
+  ""|REPLACE_*) KEY_LEN=0 ;;
+  *) KEY_LEN=$(printf "%s" "$SECRET_MASTER_KEY" | openssl base64 -d -A 2>/dev/null | wc -c | tr -d ' ') ;;
+esac
+
 if [ "$KEY_LEN" != "32" ]; then
   mkdir -p /app/apps/api/storage
   if [ ! -s /app/apps/api/storage/.secret_master_key ]; then
@@ -20,21 +25,15 @@ if [ "$KEY_LEN" != "32" ]; then
   echo "[api-entrypoint] Auto-loaded persistent 32-byte SECRET_MASTER_KEY from storage"
 fi
 
-# 3. Backwards-compatibility shim: if an older docker-compose.yml in Arcane passes
-#    "bunx prisma db push --skip-generate", automatically run Prisma 7's db:migrate:apply instead.
+# 3. Database migration mode: if _prisma_migrations does not exist yet, ensure public schema
+#    has no pre-existing vault tables before running Prisma 7's db:migrate:apply (avoids P3005).
 case "$*" in
   *"--skip-generate"*|*"db push"*|*"db:migrate:apply"*)
     echo "[api-entrypoint] Preparing schema & running Prisma 7 database migrations (bun run db:migrate:apply)..."
-    bun -e '
-      import pg from "pg";
-      const c = new pg.Client({ connectionString: process.env.DATABASE_URL });
-      await c.connect();
-      const { rows } = await c.query("SELECT to_regclass(\x27public._prisma_migrations\x27) AS m");
-      if (!rows[0]?.m) {
-        await c.query("DROP TABLE IF EXISTS public.ats_credentials, public.imap_processed_emails CASCADE");
-      }
-      await c.end();
-    '
+    HAS_MIGRATIONS=$(psql "$DATABASE_URL" -tAc "SELECT to_regclass('public._prisma_migrations');" 2>/dev/null | tr -d ' \r\n' || true)
+    if [ -z "$HAS_MIGRATIONS" ]; then
+      psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -c "DROP TABLE IF EXISTS public.ats_credentials, public.imap_processed_emails CASCADE;"
+    fi
     exec bun run db:migrate:apply
     ;;
 esac

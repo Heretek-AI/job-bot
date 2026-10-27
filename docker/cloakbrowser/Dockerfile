@@ -12,7 +12,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN mkdir -p /data/profile /app/shared/resumes
 
 COPY entrypoint.sh /usr/local/bin/cloak-entrypoint.sh
-RUN chmod +x /usr/local/bin/cloak-entrypoint.sh
+RUN sed -i 's/\r$//' /usr/local/bin/cloak-entrypoint.sh && chmod +x /usr/local/bin/cloak-entrypoint.sh
 
 EXPOSE 9222
 
