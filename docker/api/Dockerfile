@@ -25,8 +25,12 @@ COPY --from=deps /app/apps/api /app/apps/api
 
 RUN mkdir -p storage /app/shared/resumes
 
+COPY entrypoint.sh /entrypoint.sh
+RUN sed -i 's/\r$//' /entrypoint.sh && chmod +x /entrypoint.sh
+
 ENV NODE_ENV=production
 ENV PORT=4101
 EXPOSE 4101
 
+ENTRYPOINT ["/entrypoint.sh"]
 CMD ["bun", "run", "start"]
