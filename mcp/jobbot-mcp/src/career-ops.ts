@@ -1,0 +1,71 @@
+import fs from "node:fs/promises";
+import path from "node:path";
+import { chromium } from "playwright-core";
+
+/**
+ * Compiles an ATS-clean HTML or Markdown resume into a single-page PDF using
+ * Career-Ops's styling conventions and our CloakBrowser Chromium CDP server.
+ */
+export async function compileAtsPdfViaCloakBrowser(params: {
+  htmlContent: string;
+  outputFilename: string;
+  cdpUrl?: string;
+  outputDir?: string;
+}): Promise<{ pdfPath: string; bytes: number }> {
+  const cdpUrl =
+    params.cdpUrl || process.env.CLOAKBROWSER_CDP_URL || "http://cloakbrowser:9222";
+  const outputDir =
+    params.outputDir || process.env.SHARED_RESUMES_DIR || "/app/shared/resumes";
+
+  await fs.mkdir(outputDir, { recursive: true });
+  const safeName = params.outputFilename
+    .replace(/[^a-zA-Z0-9._-]/g, "_")
+    .replace(/\.pdf$/i, "");
+  const pdfPath = path.join(outputDir, `${safeName}.pdf`);
+
+  const fullHtml = params.htmlContent.includes("<html")
+    ? params.htmlContent
+    : `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <style>
+    @page { size: letter; margin: 0.45in 0.5in; }
+    body {
+      font-family: "Calibri", "Helvetica Neue", Arial, sans-serif;
+      font-size: 10pt;
+      line-height: 1.35;
+      color: #111111;
+      margin: 0;
+      padding: 0;
+    }
+    h1 { font-size: 18pt; margin: 0 0 4pt 0; }
+    h2 { font-size: 11pt; text-transform: uppercase; border-bottom: 1px solid #333; margin: 10pt 0 4pt 0; padding-bottom: 2pt; }
+    h3 { font-size: 10.5pt; margin: 6pt 0 2pt 0; }
+    p, ul { margin: 2pt 0 4pt 0; }
+    ul { padding-left: 16pt; }
+    li { margin-bottom: 2pt; }
+  </style>
+</head>
+<body>
+${params.htmlContent}
+</body>
+</html>`;
+
+  const browser = await chromium.connectOverCDP(cdpUrl);
+  try {
+    const context = await browser.newContext();
+    const page = await context.newPage();
+    await page.setContent(fullHtml, { waitUntil: "networkidle" });
+    const pdfBuffer = await page.pdf({
+      format: "Letter",
+      printBackground: true,
+      margin: { top: "0.45in", bottom: "0.45in", left: "0.5in", right: "0.5in" },
+    });
+    await fs.writeFile(pdfPath, pdfBuffer);
+    await context.close();
+    return { pdfPath, bytes: pdfBuffer.byteLength };
+  } finally {
+    await browser.close();
+  }
+}
