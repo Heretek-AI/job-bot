@@ -49,7 +49,20 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-    command: ["bun", "run", "db:migrate:apply"]
+    command:
+      - "sh"
+      - "-c"
+      - |
+        bun -e '
+          import pg from "pg";
+          const c = new pg.Client({ connectionString: process.env.DATABASE_URL });
+          await c.connect();
+          const { rows } = await c.query("SELECT to_regclass(\x27public._prisma_migrations\x27) AS m");
+          if (!rows[0]?.m) {
+            await c.query("DROP TABLE IF EXISTS public.ats_credentials, public.imap_processed_emails CASCADE");
+          }
+          await c.end();
+        ' && bun run db:migrate:apply
     restart: "no"
 
   # ============================================================================

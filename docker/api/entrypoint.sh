@@ -24,7 +24,17 @@ fi
 #    "bunx prisma db push --skip-generate", automatically run Prisma 7's db:migrate:apply instead.
 case "$*" in
   *"--skip-generate"*|*"db push"*|*"db:migrate:apply"*)
-    echo "[api-entrypoint] Running Prisma 7 database migrations (bun run db:migrate:apply)..."
+    echo "[api-entrypoint] Preparing schema & running Prisma 7 database migrations (bun run db:migrate:apply)..."
+    bun -e '
+      import pg from "pg";
+      const c = new pg.Client({ connectionString: process.env.DATABASE_URL });
+      await c.connect();
+      const { rows } = await c.query("SELECT to_regclass(\x27public._prisma_migrations\x27) AS m");
+      if (!rows[0]?.m) {
+        await c.query("DROP TABLE IF EXISTS public.ats_credentials, public.imap_processed_emails CASCADE");
+      }
+      await c.end();
+    '
     exec bun run db:migrate:apply
     ;;
 esac
