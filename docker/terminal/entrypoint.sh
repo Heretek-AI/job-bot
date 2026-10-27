@@ -300,13 +300,78 @@ if [ -f "${PLUGIN_DIR}/skills/apply/SKILL.md" ] && ! grep -q "ats_get_or_create_
 EOF
 fi
 
-# 5. Install a wrapper at /root/.local/bin/claude (ahead of /usr/bin/claude in PATH)
-# that maps `--permission-mode auto` -> `--permission-mode dontAsk` so Claude Code 2.1+
-# uses our explicit `permissions.allow` rules instead of hanging on Anthropic's first-party
-# autoMode safety classifier when running against OpenCode / custom models.
+# 5. Symlink /root/.jobpilot/apps -> /app/apps so skills using ${JOBPILOT_WORKSPACE_ROOT}/apps/api/storage/resumes
+#    resolve to the shared api-storage volume (/app/apps/api/storage/resumes).
+mkdir -p /app/apps/api/storage/resumes
+ln -sfn /app/apps "${INSTALL_DIR}/apps"
+
+# 6. Force JOBPILOT_API=http://api:4101 in plugin/bin/jobpilot-api and /root/.local/bin/claude
+#    (the browser passes its host URL e.g. http://localhost:8081 in POST /sessions/start, which would
+#     otherwise point JOBPILOT_API at the terminal container's own loopback).
+cat > "${PLUGIN_DIR}/bin/jobpilot-api" << 'EOF'
+#!/bin/sh
+dir=$(dirname "$0")
+export JOBPILOT_API="http://api:4101"
+MSYS_NO_PATHCONV=1 exec node "$dir/api.mjs" "$@"
+EOF
+chmod +x "${PLUGIN_DIR}/bin/jobpilot-api"
+
+# Also run a lightweight loopback TCP bridge on 127.0.0.1:${PUBLIC_PORT}, 8080, 4101, 4100 inside
+# the terminal container so any .NET Pilot loop or tool calling localhost:<port> reaches api/nginx/web.
+python3 - <<'PY' &
+import asyncio, os
+
+bridges = {
+    4101: ("api", 4101),
+    4100: ("web", 4100),
+    8080: ("nginx", 8080),
+}
+pub_port = os.environ.get("PUBLIC_PORT", "").strip()
+if pub_port.isdigit() and int(pub_port) != 4102:
+    bridges[int(pub_port)] = ("nginx", 8080)
+
+async def pipe(r, w):
+    try:
+        while chunk := await r.read(65536):
+            w.write(chunk)
+            await w.drain()
+    except Exception:
+        pass
+    finally:
+        try:
+            w.close()
+        except Exception:
+            pass
+
+def make_handler(host, port):
+    async def handle(cr, cw):
+        try:
+            ur, uw = await asyncio.open_connection(host, port)
+        except Exception:
+            cw.close()
+            return
+        await asyncio.gather(pipe(cr, uw), pipe(ur, cw))
+    return handle
+
+async def main():
+    servers = []
+    for local_port, (target_host, target_port) in bridges.items():
+        try:
+            srv = await asyncio.start_server(make_handler(target_host, target_port), "127.0.0.1", local_port)
+            servers.append(srv)
+        except Exception:
+            pass
+    await asyncio.Event().wait()
+
+asyncio.run(main())
+PY
+
+# 7. Install a wrapper at /root/.local/bin/claude (ahead of /usr/bin/claude in PATH)
+# that maps `--permission-mode auto` -> `--permission-mode dontAsk` and ensures JOBPILOT_API=http://api:4101
 mkdir -p /root/.local/bin
 cat > /root/.local/bin/claude << 'EOF'
 #!/usr/bin/env bash
+export JOBPILOT_API="http://api:4101"
 args=()
 while [[ $# -gt 0 ]]; do
   if [[ "$1" == "--permission-mode" && "${2:-}" == "auto" ]]; then
