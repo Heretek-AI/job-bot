@@ -49,7 +49,7 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-    command: ["bunx", "prisma", "db", "push", "--skip-generate"]
+    command: ["bun", "run", "db:migrate:apply"]
     restart: "no"
 
   # ============================================================================
@@ -111,6 +111,25 @@ services:
         condition: service_healthy
       vault-init:
         condition: service_completed_successfully
+    command:
+      - "sh"
+      - "-c"
+      - |
+        for var in SUPER_ADMIN_EMAIL GOOGLE_CLIENT_ID GOOGLE_CLIENT_SECRET GITHUB_CLIENT_ID GITHUB_CLIENT_SECRET RESEND_API_KEY VAPID_PUBLIC_KEY VAPID_PRIVATE_KEY VAPID_SUBJECT; do
+          eval "val=\$${var}"
+          if [ -z "$$val" ]; then unset "$$var"; fi
+        done
+        KEY_LEN=$$(bun -e "try { const k = process.env.SECRET_MASTER_KEY || ''; console.log(k.startsWith('REPLACE_') ? 0 : Buffer.from(k, 'base64').length); } catch { console.log(0); }")
+        if [ "$$KEY_LEN" != "32" ]; then
+          mkdir -p /app/apps/api/storage
+          if [ ! -s /app/apps/api/storage/.secret_master_key ]; then
+            openssl rand -base64 32 | tr -d '\r\n' > /app/apps/api/storage/.secret_master_key
+          fi
+          export SECRET_MASTER_KEY=$$(cat /app/apps/api/storage/.secret_master_key | tr -d '\r\n')
+          echo "[api] Auto-loaded persistent 32-byte SECRET_MASTER_KEY from storage"
+        fi
+        bun run db:seed || echo "[api] Warning: db:seed returned non-zero, continuing..."
+        exec bun run start
     healthcheck:
       test: ["CMD", "bun", "-e", "fetch('http://localhost:4101/api/health').then((r) => process.exit(r.ok ? 0 : 1), () => process.exit(1))"]
       interval: 20s
