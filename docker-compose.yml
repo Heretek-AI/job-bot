@@ -196,6 +196,8 @@ services:
     shm_size: "1gb"
     env_file: .env
     environment:
+      DOTNET_EnableWriteXorExecute: "0"
+      PUBLIC_PORT: ${PUBLIC_PORT:-8080}
       JOBPILOT_API: http://api:4101
       JOBPILOT_WEB: http://web:4100
       JOBPILOT_API_TOKEN: ${JOBPILOT_API_TOKEN:-}

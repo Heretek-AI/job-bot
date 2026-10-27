@@ -46,12 +46,22 @@ origins = {
     "http://127.0.0.1:8080",
     "http://web:4100",
 }
+pub_port = os.environ.get("PUBLIC_PORT", "").strip()
+if pub_port:
+    origins.add(f"http://localhost:{pub_port}")
+    origins.add(f"http://127.0.0.1:{pub_port}")
+
 for env_key in ("PUBLIC_URL", "APP_URL", "CORS_ORIGINS"):
     val = os.environ.get(env_key, "")
     for item in val.split(","):
         item = item.strip().rstrip("/")
         if item:
             origins.add(item)
+            if ":" in item.split("//")[-1]:
+                port = item.rsplit(":", 1)[-1]
+                if port.isdigit():
+                    origins.add(f"http://localhost:{port}")
+                    origins.add(f"http://127.0.0.1:{port}")
 
 cfg = {
     "Kestrel": {
@@ -225,4 +235,5 @@ EOF
 fi
 
 echo "[terminal] Launching JobPilot Terminal Host on 0.0.0.0:4102..."
+export DOTNET_EnableWriteXorExecute=0
 exec "${INSTALL_DIR}/jobpilot"

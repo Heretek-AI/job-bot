@@ -56,6 +56,7 @@ RUN sed -i 's/\r$//' /usr/local/bin/terminal-entrypoint.sh \
     && mkdir -p /app/shared/resumes /root/.claude /root/.jobpilot
 
 WORKDIR /root/.jobpilot
+ENV DOTNET_EnableWriteXorExecute=0
 EXPOSE 4102
 
 ENTRYPOINT ["/usr/local/bin/terminal-entrypoint.sh"]
