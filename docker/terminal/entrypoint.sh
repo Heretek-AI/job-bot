@@ -300,6 +300,13 @@ if [ -f "${PLUGIN_DIR}/skills/apply/SKILL.md" ] && ! grep -q "ats_get_or_create_
 EOF
 fi
 
+# 5. Patch extract-resume/SKILL.md so OpenCode / non-Anthropic models use `pdftotext -layout`
+#    instead of Claude Code's `Read` tool on binary .pdf files (non-Anthropic models do not receive
+#    Anthropic-proprietary `type: "document"` base64 PDF blocks from `Read`).
+if [ -f "${PLUGIN_DIR}/skills/extract-resume/SKILL.md" ] && ! grep -q "pdftotext -layout" "${PLUGIN_DIR}/skills/extract-resume/SKILL.md"; then
+  sed -i 's/`Read` the PDF at the path from Step 2\./Do **NOT** call `Read` directly on the `.pdf` file (OpenCode\/non-Anthropic models do not receive binary PDF blocks from `Read`). Instead, run `pdftotext -layout "<pdf_path>" "$JOBPILOT_TEMP\/resume-text.txt"` via `Bash` and then `Read` `"$JOBPILOT_TEMP\/resume-text.txt"`./g' "${PLUGIN_DIR}/skills/extract-resume/SKILL.md"
+fi
+
 # 5. Symlink /root/.jobpilot/apps -> /app/apps so skills using ${JOBPILOT_WORKSPACE_ROOT}/apps/api/storage/resumes
 #    resolve to the shared api-storage volume (/app/apps/api/storage/resumes).
 mkdir -p /app/apps/api/storage/resumes
