@@ -1,4 +1,6 @@
 import crypto from "node:crypto";
+import fs from "node:fs";
+import path from "node:path";
 import type { Pool } from "pg";
 
 export interface AtsCredentialRecord {
@@ -33,11 +35,28 @@ interface StoredVaultEntry {
   lastUsedAt: string;
 }
 
-// In-memory fallback store used when DATABASE_URL is not connected (e.g. local unit tests)
+const SCRYPT_SALT = "jobbot-ats-vault-kdf-salt-v1";
+const MIN_SECRET_LENGTH = 32;
+
+// In-memory fallback store used only when pool is null (e.g. local unit tests)
 const memoryVault = new Map<string, StoredVaultEntry>();
 
 /**
- * Normalizes any ATS URL into its tenant-specific hostname and detects the ATS family.
+ * Validates that the vault master secret is present and at least 32 characters long.
+ * Fails closed by throwing an error if missing, too short, or left as an obvious placeholder.
+ */
+export function validateMasterSecret(masterSecret: string | undefined): string {
+  const trimmed = (masterSecret ?? "").trim();
+  if (trimmed.length < MIN_SECRET_LENGTH) {
+    throw new Error(
+      `ATS_VAULT_MASTER_SECRET must be at least ${MIN_SECRET_LENGTH} characters long (got ${trimmed.length}).`
+    );
+  }
+  return trimmed;
+}
+
+/**
+ * Normalizes any ATS URL or hostname into its tenant-specific hostname and detects the ATS family.
  * E.g. https://nvidia.wd5.myworkdayjobs.com/en-US/External/job/123 -> { hostname: 'nvidia.wd5.myworkdayjobs.com', atsFamily: 'workday' }
  */
 export function parsePortalIdentity(portalUrlOrHost: string): {
@@ -45,6 +64,9 @@ export function parsePortalIdentity(portalUrlOrHost: string): {
   atsFamily: string;
 } {
   let raw = portalUrlOrHost.trim();
+  if (!raw) {
+    throw new Error("portalUrlOrHost cannot be empty.");
+  }
   if (!/^https?:\/\//i.test(raw)) {
     raw = `https://${raw}`;
   }
@@ -53,31 +75,65 @@ export function parsePortalIdentity(portalUrlOrHost: string): {
 
   let atsFamily = "generic";
   if (
-    hostname.includes("myworkdayjobs.com") ||
-    hostname.includes("myworkdaysite.com") ||
-    hostname.endsWith("workday.com")
+    hostname === "myworkdayjobs.com" ||
+    hostname.endsWith(".myworkdayjobs.com") ||
+    hostname === "myworkdaysite.com" ||
+    hostname.endsWith(".myworkdaysite.com") ||
+    hostname === "workday.com" ||
+    hostname.endsWith(".workday.com")
   ) {
     atsFamily = "workday";
-  } else if (hostname.includes("icims.com")) {
+  } else if (hostname === "icims.com" || hostname.endsWith(".icims.com")) {
     atsFamily = "icims";
-  } else if (hostname.includes("taleo.net") || hostname.includes("oraclecloud.com")) {
+  } else if (
+    hostname === "taleo.net" ||
+    hostname.endsWith(".taleo.net") ||
+    hostname === "oraclecloud.com" ||
+    hostname.endsWith(".oraclecloud.com")
+  ) {
     atsFamily = "oracle_taleo";
   } else if (
-    hostname.includes("successfactors.com") ||
-    hostname.includes("successfactors.eu")
+    hostname === "successfactors.com" ||
+    hostname.endsWith(".successfactors.com") ||
+    hostname === "successfactors.eu" ||
+    hostname.endsWith(".successfactors.eu")
   ) {
     atsFamily = "successfactors";
-  } else if (hostname.includes("greenhouse.io")) {
+  } else if (
+    hostname === "greenhouse.io" ||
+    hostname.endsWith(".greenhouse.io")
+  ) {
     atsFamily = "greenhouse";
-  } else if (hostname.includes("lever.co")) {
+  } else if (hostname === "lever.co" || hostname.endsWith(".lever.co")) {
     atsFamily = "lever";
-  } else if (hostname.includes("ashbyhq.com")) {
+  } else if (hostname === "ashbyhq.com" || hostname.endsWith(".ashbyhq.com")) {
     atsFamily = "ashby";
-  } else if (hostname.includes("smartrecruiters.com")) {
+  } else if (
+    hostname === "smartrecruiters.com" ||
+    hostname.endsWith(".smartrecruiters.com")
+  ) {
     atsFamily = "smartrecruiters";
   }
 
   return { hostname, atsFamily };
+}
+
+/**
+ * Picks a character from a charset without modulo bias using rejection sampling over a digest buffer.
+ */
+function pickUnbiasedChar(
+  charset: string,
+  seedBuffer: Buffer,
+  offset: number
+): string {
+  const maxValid = Math.floor(256 / charset.length) * charset.length;
+  for (let i = 0; i < seedBuffer.length; i++) {
+    const byte = seedBuffer[(offset + i) % seedBuffer.length];
+    if (byte < maxValid) {
+      return charset[byte % charset.length];
+    }
+  }
+  return charset[seedBuffer[offset % seedBuffer.length] % charset.length];
 }
 
 /**
@@ -91,9 +147,10 @@ export function generateCompliantAtsPassword(
   masterSecret: string,
   prefix = "JobBot#2026!"
 ): string {
+  const validSecret = validateMasterSecret(masterSecret);
   const hmac = crypto
-    .createHmac("sha256", masterSecret)
-    .update(`ats-pwd-v1:${hostname}`)
+    .createHmac("sha256", validSecret)
+    .update(`ats-pwd-v1:${hostname.toLowerCase()}`)
     .digest();
 
   const uppers = "ABCDEFGHJKLMNPQRSTUVWXYZ";
@@ -101,28 +158,32 @@ export function generateCompliantAtsPassword(
   const digits = "23456789";
   const specials = "!@#$%&*?";
 
-  const pick = (charset: string, byteIndex: number) =>
-    charset[hmac[byteIndex % hmac.length] % charset.length];
-
   const suffix = [
-    pick(uppers, 0),
-    pick(lowers, 1),
-    pick(digits, 2),
-    pick(specials, 3),
-    pick(uppers, 4),
-    pick(lowers, 5),
-    pick(digits, 6),
-    pick(lowers, 7),
+    pickUnbiasedChar(uppers, hmac, 0),
+    pickUnbiasedChar(lowers, hmac, 4),
+    pickUnbiasedChar(digits, hmac, 8),
+    pickUnbiasedChar(specials, hmac, 12),
+    pickUnbiasedChar(uppers, hmac, 16),
+    pickUnbiasedChar(lowers, hmac, 20),
+    pickUnbiasedChar(digits, hmac, 24),
+    pickUnbiasedChar(lowers, hmac, 28),
   ].join("");
 
   const cleanPrefix = prefix.replace(/\s+/g, "") || "JobBot#2026!";
   return `${cleanPrefix}${suffix}`;
 }
 
+/**
+ * Derives a 256-bit AES key from the master secret using scrypt KDF.
+ */
 function deriveKey(masterSecret: string): Buffer {
-  return crypto.createHash("sha256").update(masterSecret).digest();
+  const validSecret = validateMasterSecret(masterSecret);
+  return crypto.scryptSync(validSecret, SCRYPT_SALT, 32);
 }
 
+/**
+ * Encrypts a plaintext password using AES-256-GCM with a random 96-bit IV and scrypt-derived key.
+ */
 export function encryptPassword(
   plainText: string,
   masterSecret: string
@@ -146,6 +207,9 @@ export function encryptPassword(
   };
 }
 
+/**
+ * Decrypts an AES-256-GCM ciphertext using the scrypt-derived key.
+ */
 export function decryptPassword(
   encryptedPassword: string,
   ivBase64: string,
@@ -165,6 +229,35 @@ export function decryptPassword(
 }
 
 /**
+ * Resolves the JobPilot API bearer token from JOBPILOT_API_TOKEN env var or the
+ * terminal host's paired pilot.json file (/root/.jobpilot/pilot.json).
+ */
+export function resolveJobPilotApiToken(): string | null {
+  const envToken = process.env.JOBPILOT_API_TOKEN?.trim();
+  if (envToken) {
+    return envToken;
+  }
+
+  const installDir = process.env.JOBPILOT_INSTALL_DIR || "/root/.jobpilot";
+  const pilotJsonPath = path.join(installDir, "pilot.json");
+  try {
+    if (fs.existsSync(pilotJsonPath)) {
+      const raw = JSON.parse(fs.readFileSync(pilotJsonPath, "utf8")) as {
+        apiToken?: string;
+        token?: string;
+      };
+      const fileToken = (raw.apiToken || raw.token || "").trim();
+      if (fileToken) {
+        return fileToken;
+      }
+    }
+  } catch {
+    // Ignore unreadable pilot.json
+  }
+  return null;
+}
+
+/**
  * Best-effort sync to JobPilot's native /api/credentials endpoint so saved passwords
  * also appear in the JobPilot Web UI under Credentials.
  */
@@ -173,8 +266,11 @@ export async function syncCredentialToJobPilotApi(params: {
   email: string;
   password: string;
 }): Promise<boolean> {
-  const apiUrl = (process.env.JOBPILOT_API || "http://api:4101").replace(/\/+$/, "");
-  const apiToken = process.env.JOBPILOT_API_TOKEN?.trim();
+  const apiUrl = (process.env.JOBPILOT_API || "http://api:4101").replace(
+    /\/+$/,
+    ""
+  );
+  const apiToken = resolveJobPilotApiToken();
   if (!apiToken) {
     return false;
   }
@@ -185,10 +281,11 @@ export async function syncCredentialToJobPilotApi(params: {
   };
 
   try {
-    // 1. Check if a board credential already resolves for this domain
     const resolveResp = await fetch(
-      `${apiUrl}/api/credentials/resolve?domain=${encodeURIComponent(params.hostname)}`,
-      { headers }
+      `${apiUrl}/api/credentials/resolve?domain=${encodeURIComponent(
+        params.hostname
+      )}`,
+      { headers, signal: AbortSignal.timeout(10_000) }
     );
     if (resolveResp.ok) {
       const body = (await resolveResp.json()) as {
@@ -204,13 +301,13 @@ export async function syncCredentialToJobPilotApi(params: {
               email: params.email,
               password: params.password,
             }),
+            signal: AbortSignal.timeout(10_000),
           }
         );
         return patchResp.ok;
       }
     }
 
-    // 2. Otherwise create a new board credential
     const createResp = await fetch(`${apiUrl}/api/credentials`, {
       method: "POST",
       headers,
@@ -220,6 +317,7 @@ export async function syncCredentialToJobPilotApi(params: {
         email: params.email,
         password: params.password,
       }),
+      signal: AbortSignal.timeout(10_000),
     });
     return createResp.ok;
   } catch {
@@ -240,6 +338,7 @@ export async function getOrCreateAtsCredentials(
     passwordPrefix?: string;
   }
 ): Promise<AtsCredentialRecord> {
+  const validSecret = validateMasterSecret(params.masterSecret);
   const { hostname, atsFamily } = parsePortalIdentity(params.portalUrl);
 
   if (pool) {
@@ -260,7 +359,7 @@ export async function getOrCreateAtsCredentials(
         row.encrypted_password,
         row.iv,
         row.auth_tag,
-        params.masterSecret
+        validSecret
       );
       return {
         portalHostname: row.portal_hostname,
@@ -279,7 +378,7 @@ export async function getOrCreateAtsCredentials(
       entry.encryptedPassword,
       entry.iv,
       entry.authTag,
-      params.masterSecret
+      validSecret
     );
     return {
       portalHostname: entry.portalHostname,
@@ -294,7 +393,7 @@ export async function getOrCreateAtsCredentials(
 
   const password = generateCompliantAtsPassword(
     hostname,
-    params.masterSecret,
+    validSecret,
     params.passwordPrefix
   );
 
@@ -303,7 +402,7 @@ export async function getOrCreateAtsCredentials(
     companyName: params.companyName,
     email: params.email,
     password,
-    masterSecret: params.masterSecret,
+    masterSecret: validSecret,
     accountVerified: false,
     isNewFlag: true,
   });
@@ -325,10 +424,11 @@ export async function saveAtsCredentials(
     isNewFlag?: boolean;
   }
 ): Promise<AtsCredentialRecord> {
+  const validSecret = validateMasterSecret(params.masterSecret);
   const { hostname, atsFamily } = parsePortalIdentity(params.portalUrl);
   const { encryptedPassword, iv, authTag } = encryptPassword(
     params.password,
-    params.masterSecret
+    validSecret
   );
   const verified = params.accountVerified ?? true;
 

@@ -27,6 +27,16 @@ export interface ClassifiedEmailUpdate {
 }
 
 /**
+ * Checks whether a candidate hostname matches or is a subdomain of the expected domain.
+ */
+function isHostMatchingDomain(host: string, targetDomain: string): boolean {
+  const cleanHost = host.toLowerCase();
+  const cleanTarget = targetDomain.toLowerCase();
+  if (!cleanTarget) return false;
+  return cleanHost === cleanTarget || cleanHost.endsWith(`.${cleanTarget}`);
+}
+
+/**
  * Safely extracts a 4-8 character verification OTP code and/or a magic verification link
  * whose hostname belongs to the target boardDomain (preventing phishing or tracking links).
  */
@@ -43,12 +53,16 @@ export function extractVerificationFromContent(
     .replace(/^https?:\/\//, "")
     .replace(/\/.*$/, "");
 
-  // 1. Extract explicit security/verification codes (Greenhouse 8-char alphanumeric or 4-8 digit OTPs)
+  if (!cleanDomain) {
+    return { verificationCode: null, verificationLink: null };
+  }
+
+  // 1. Extract explicit security/verification codes (Greenhouse 8-char alphanumeric containing >=1 digit, or 4-8 digit OTPs)
   let verificationCode: string | null = null;
 
   const explicitPatterns = [
-    /(?:security|verification|confirmation|login|passcode|one-time)\s+code(?:\s+is)?[\s:–-]+([A-Z0-9]{4,8})\b/i,
-    /\bcode[\s:–-]+([A-Z0-9]{6,8})\b/i,
+    /(?:security|verification|confirmation|login|passcode|one-time)\s+code(?:\s+is)?[\s:–-]+((?=[A-Z0-9]*\d)[A-Z0-9]{4,8})\b/i,
+    /\bcode[\s:–-]+((?=[A-Z0-9]*\d)[A-Z0-9]{6,8})\b/i,
     /\b(\d{6})\b/,
     /\b(\d{4,8})\b/,
   ];
@@ -57,15 +71,15 @@ export function extractVerificationFromContent(
     const match = combinedText.match(regex);
     if (match && match[1]) {
       const candidate = match[1].trim();
-      // Avoid matching years like 2025/2026 unless explicitly labeled
-      if (!/^(19\d\d|20[2-3]\d)$/.test(candidate)) {
+      // Avoid matching calendar years like 1990-2099
+      if (!/^(19\d\d|20\d\d)$/.test(candidate)) {
         verificationCode = candidate;
         break;
       }
     }
   }
 
-  // 2. Extract verification/activation URLs scoped to the target board domain (or known ATS email routers)
+  // 2. Extract verification/activation URLs strictly scoped to the target board domain
   let verificationLink: string | null = null;
   const urlRegex = /https?:\/\/[^\s"'<>)+]+/gi;
   const allUrls = [
@@ -73,7 +87,6 @@ export function extractVerificationFromContent(
     ...(htmlBody.match(urlRegex) ?? []),
   ];
 
-  // Allowed base domains for the target board
   const baseDomainParts = cleanDomain.split(".");
   const rootDomain =
     baseDomainParts.length >= 2
@@ -86,13 +99,11 @@ export function extractVerificationFromContent(
       const parsed = new URL(cleanedUrl);
       const host = parsed.hostname.toLowerCase();
       const domainMatches =
-        !cleanDomain ||
-        host === cleanDomain ||
-        host.endsWith(`.${cleanDomain}`) ||
-        host === rootDomain ||
-        host.endsWith(`.${rootDomain}`) ||
-        (rootDomain.includes("workday") &&
-          (host.includes("myworkdayjobs.com") || host.includes("myworkdaysite.com")));
+        isHostMatchingDomain(host, cleanDomain) ||
+        isHostMatchingDomain(host, rootDomain) ||
+        (rootDomain === "workday.com" &&
+          (isHostMatchingDomain(host, "myworkdayjobs.com") ||
+            isHostMatchingDomain(host, "myworkdaysite.com")));
 
       if (!domainMatches) {
         continue;
@@ -119,7 +130,7 @@ export function extractVerificationFromContent(
 }
 
 /**
- * Classifies a job-related email into pipeline stages.
+ * Classifies a job-related email into pipeline stages based on subject and body patterns.
  */
 export function classifyJobEmail(
   subject: string,
@@ -165,10 +176,13 @@ export function classifyJobEmail(
   return "other";
 }
 
+/**
+ * Creates a configured ImapFlow client using Gmail App Password credentials from the environment.
+ */
 function createImapClient(): ImapFlow {
-  const user = process.env.GMAIL_ADDRESS || "";
+  const user = (process.env.GMAIL_ADDRESS || "").trim();
   const pass = (process.env.GMAIL_APP_PASSWORD || "").replace(/\s+/g, "");
-  const host = process.env.GMAIL_IMAP_HOST || "imap.gmail.com";
+  const host = (process.env.GMAIL_IMAP_HOST || "imap.gmail.com").trim();
   const port = Number(process.env.GMAIL_IMAP_PORT || 993);
 
   if (!user || !pass) {
@@ -186,23 +200,41 @@ function createImapClient(): ImapFlow {
   });
 }
 
+/**
+ * Polls the Gmail inbox via IMAP for a verification code or activation link matching boardDomain.
+ * Guarantees IMAP lock release and client logout in a finally block on all return paths.
+ */
 export async function waitForVerificationEmail(params: {
   boardDomain: string;
   timeoutSeconds?: number;
   pollIntervalSeconds?: number;
 }): Promise<ExtractedVerification | null> {
-  const timeoutMs = Math.min(Math.max(params.timeoutSeconds ?? 45, 5), 120) * 1000;
-  const pollMs = (params.pollIntervalSeconds ?? 5) * 1000;
-  const deadline = Date.now() + timeoutMs;
-  const sinceWindow = new Date(Date.now() - 10 * 60 * 1000); // Look back 10 minutes
+  const cleanDomain = params.boardDomain.trim().toLowerCase();
+  if (!cleanDomain) {
+    throw new Error("boardDomain must be a non-empty domain string.");
+  }
 
-  while (Date.now() <= deadline) {
-    const client = createImapClient();
-    try {
-      await client.connect();
-      const lock = await client.getMailboxLock("INBOX");
+  const timeoutMs =
+    Math.min(Math.max(params.timeoutSeconds ?? 45, 5), 120) * 1000;
+  const pollMs =
+    Math.min(Math.max(params.pollIntervalSeconds ?? 5, 2), 30) * 1000;
+  const deadline = Date.now() + timeoutMs;
+  // Exact cutoff timestamp (10-minute lookback window for clock skew / recent trigger)
+  const exactCutoffMs = Date.now() - 10 * 60 * 1000;
+  const sinceSearchDate = new Date(exactCutoffMs);
+
+  const client = createImapClient();
+  try {
+    await client.connect();
+
+    while (Date.now() <= deadline) {
+      let lock: Awaited<ReturnType<ImapFlow["getMailboxLock"]>> | null = null;
       try {
-        const uids = await client.search({ since: sinceWindow }, { uid: true });
+        lock = await client.getMailboxLock("INBOX");
+        const uids = await client.search(
+          { since: sinceSearchDate },
+          { uid: true }
+        );
         if (uids && uids.length > 0) {
           const recentUids = uids.slice(-15).reverse();
           for (const uid of recentUids) {
@@ -214,14 +246,22 @@ export async function waitForVerificationEmail(params: {
             if (!msg || !msg.source) continue;
 
             const parsed = await simpleParser(msg.source);
+            const msgDate =
+              (msg.internalDate ? new Date(msg.internalDate) : parsed.date) ||
+              new Date(0);
+            if (msgDate.getTime() < exactCutoffMs) {
+              continue;
+            }
+
             const subject = parsed.subject || "";
             const fromAddress = parsed.from?.value?.[0]?.address || "";
             const textBody = parsed.text || "";
             const htmlBody = typeof parsed.html === "string" ? parsed.html : "";
 
-            const domainLower = params.boardDomain.toLowerCase().replace(/^https?:\/\//, "");
+            const domainLower = cleanDomain.replace(/^https?:\/\//, "");
             const baseKeyword = domainLower.split(".")[0];
-            const haystack = `${fromAddress} ${subject} ${textBody}`.toLowerCase();
+            const haystack =
+              `${fromAddress} ${subject} ${textBody}`.toLowerCase();
 
             if (
               domainLower &&
@@ -239,7 +279,7 @@ export async function waitForVerificationEmail(params: {
                 subject,
                 textBody,
                 htmlBody,
-                params.boardDomain
+                cleanDomain
               );
 
             if (verificationCode || verificationLink) {
@@ -248,94 +288,101 @@ export async function waitForVerificationEmail(params: {
                 verificationLink,
                 subject,
                 fromAddress,
-                receivedAt: (parsed.date || new Date()).toISOString(),
+                receivedAt: msgDate.toISOString(),
               };
             }
           }
         }
       } finally {
-        lock.release();
+        lock?.release();
       }
-      await client.logout();
-    } catch (err) {
-      try {
-        await client.logout();
-      } catch {
-        // ignore logout error
-      }
-      throw err;
+
+      if (Date.now() + pollMs > deadline) break;
+      await new Promise((r) => setTimeout(r, pollMs));
     }
 
-    if (Date.now() + pollMs > deadline) break;
-    await new Promise((r) => setTimeout(r, pollMs));
-  }
-
-  return null;
-}
-
-export async function pollRecentJobEmails(
-  sinceHours = 24
-): Promise<ClassifiedEmailUpdate[]> {
-  const client = createImapClient();
-  const sinceDate = new Date(Date.now() - sinceHours * 3600 * 1000);
-  const results: ClassifiedEmailUpdate[] = [];
-
-  try {
-    await client.connect();
-    const lock = await client.getMailboxLock("INBOX");
-    try {
-      const uids = await client.search({ since: sinceDate }, { uid: true });
-      if (uids && uids.length > 0) {
-        const recentUids = uids.slice(-30).reverse();
-        for (const uid of recentUids) {
-          const msg = await client.fetchOne(
-            String(uid),
-            { source: true, envelope: true },
-            { uid: true }
-          );
-          if (!msg || !msg.source) continue;
-
-          const parsed = await simpleParser(msg.source);
-          const subject = parsed.subject || "";
-          const fromAddress = parsed.from?.value?.[0]?.address || "";
-          const textBody = parsed.text || "";
-          const htmlBody = typeof parsed.html === "string" ? parsed.html : "";
-          const classification = classifyJobEmail(subject, textBody);
-          const senderDomain = fromAddress.split("@")[1] || "";
-
-          const { verificationCode, verificationLink } =
-            classification === "verification"
-              ? extractVerificationFromContent(
-                  subject,
-                  textBody,
-                  htmlBody,
-                  senderDomain
-                )
-              : { verificationCode: null, verificationLink: null };
-
-          results.push({
-            messageId: parsed.messageId || `uid-${uid}`,
-            fromAddress,
-            subject,
-            receivedAt: (parsed.date || new Date()).toISOString(),
-            classification,
-            verificationCode,
-            verificationLink,
-            snippet: textBody.slice(0, 280).replace(/\s+/g, " ").trim(),
-          });
-        }
-      }
-    } finally {
-      lock.release();
-    }
-    await client.logout();
-  } catch (err) {
+    return null;
+  } finally {
     try {
       await client.logout();
     } catch {
-      // ignore
+      // Ignore logout errors during cleanup
     }
-    throw err;
+  }
+}
+
+/**
+ * Scans recent emails in the Gmail inbox and classifies recruiter/application status updates.
+ */
+export async function pollRecentJobEmails(
+  sinceHours = 24
+): Promise<ClassifiedEmailUpdate[]> {
+  const clampedHours = Math.min(Math.max(sinceHours, 1), 720);
+  const cutoffMs = Date.now() - clampedHours * 3600 * 1000;
+  const sinceDate = new Date(cutoffMs);
+  const results: ClassifiedEmailUpdate[] = [];
+
+  const client = createImapClient();
+  let lock: Awaited<ReturnType<ImapFlow["getMailboxLock"]>> | null = null;
+  try {
+    await client.connect();
+    lock = await client.getMailboxLock("INBOX");
+
+    const uids = await client.search({ since: sinceDate }, { uid: true });
+    if (uids && uids.length > 0) {
+      const recentUids = uids.slice(-30).reverse();
+      for (const uid of recentUids) {
+        const msg = await client.fetchOne(
+          String(uid),
+          { source: true, envelope: true, internalDate: true },
+          { uid: true }
+        );
+        if (!msg || !msg.source) continue;
+
+        const parsed = await simpleParser(msg.source);
+        const msgDate =
+          (msg.internalDate ? new Date(msg.internalDate) : parsed.date) ||
+          new Date(0);
+        if (msgDate.getTime() < cutoffMs) {
+          continue;
+        }
+
+        const subject = parsed.subject || "";
+        const fromAddress = parsed.from?.value?.[0]?.address || "";
+        const textBody = parsed.text || "";
+        const htmlBody = typeof parsed.html === "string" ? parsed.html : "";
+        const classification = classifyJobEmail(subject, textBody);
+        const senderDomain = fromAddress.split("@")[1] || "";
+
+        const { verificationCode, verificationLink } =
+          classification === "verification" && senderDomain
+            ? extractVerificationFromContent(
+                subject,
+                textBody,
+                htmlBody,
+                senderDomain
+              )
+            : { verificationCode: null, verificationLink: null };
+
+        results.push({
+          messageId: parsed.messageId || `uid-${uid}`,
+          fromAddress,
+          subject,
+          receivedAt: msgDate.toISOString(),
+          classification,
+          verificationCode,
+          verificationLink,
+          snippet: textBody.slice(0, 280).replace(/\s+/g, " ").trim(),
+        });
+      }
+    }
+  } finally {
+    lock?.release();
+    try {
+      await client.logout();
+    } catch {
+      // Ignore logout errors during cleanup
+    }
   }
 
   return results;

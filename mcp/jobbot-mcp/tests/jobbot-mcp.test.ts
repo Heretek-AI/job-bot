@@ -8,6 +8,7 @@ import {
   getOrCreateAtsCredentials,
   saveAtsCredentials,
   listAtsCredentials,
+  validateMasterSecret,
 } from "../src/vault.js";
 import {
   extractVerificationFromContent,
@@ -31,7 +32,14 @@ describe("ATS Multi-Tenant Password Vault", () => {
     assert.equal(gh.atsFamily, "greenhouse");
   });
 
-  it("generates deterministic Workday-compliant strong passwords and roundtrips AES-256-GCM", () => {
+  it("fails closed when ATS_VAULT_MASTER_SECRET is missing or shorter than 32 chars", () => {
+    assert.throws(() => validateMasterSecret(""), /at least 32 characters/);
+    assert.throws(() => validateMasterSecret("too-short-secret"), /at least 32 characters/);
+    const valid = validateMasterSecret("0123456789abcdef0123456789abcdef");
+    assert.equal(valid.length, 32);
+  });
+
+  it("generates deterministic Workday-compliant strong passwords and roundtrips scrypt AES-256-GCM", () => {
     const secret = "test-master-secret-32-bytes-long!!";
     const pwd = generateCompliantAtsPassword(
       "nvidia.wd5.myworkdayjobs.com",
@@ -111,7 +119,7 @@ describe("ATS Multi-Tenant Password Vault", () => {
 });
 
 describe("Gmail IMAP Verification OTP & Magic Link Extractor", () => {
-  it("extracts 8-character Greenhouse security codes", () => {
+  it("extracts 8-character Greenhouse security codes and ignores plain English words", () => {
     const res = extractVerificationFromContent(
       "Greenhouse Security Code for your application",
       "Hi Derek, Your security code is: X9K4M2P7. Paste this into your application form.",
@@ -120,9 +128,18 @@ describe("Gmail IMAP Verification OTP & Magic Link Extractor", () => {
     );
     assert.equal(res.verificationCode, "X9K4M2P7");
     assert.equal(res.verificationLink, null);
+
+    // Ensure a plain non-digit word like "REQUIRED" after "security code is" is not matched as an OTP
+    const wordOnly = extractVerificationFromContent(
+      "Verification notice",
+      "A security code is REQUIRED to continue.",
+      "",
+      "greenhouse.io"
+    );
+    assert.equal(wordOnly.verificationCode, null);
   });
 
-  it("extracts Workday account activation links and rejects untrusted phishing domains", () => {
+  it("extracts Workday account activation links and rejects untrusted or spoofed-subdomain phishing domains", () => {
     const goodRes = extractVerificationFromContent(
       "Verify your Workday account",
       "Click the link to activate your account: https://nvidia.wd5.myworkdayjobs.com/en-US/External/activate?token=abc123xyz",
@@ -141,6 +158,14 @@ describe("Gmail IMAP Verification OTP & Magic Link Extractor", () => {
       "workday.com"
     );
     assert.equal(phishingRes.verificationLink, null);
+
+    const spoofedSubdomainRes = extractVerificationFromContent(
+      "Verify your Workday account",
+      "Click to verify: https://myworkdayjobs.com.evil.ru/activate?token=steal",
+      "",
+      "workday.com"
+    );
+    assert.equal(spoofedSubdomainRes.verificationLink, null);
   });
 
   it("classifies job pipeline emails accurately", () => {

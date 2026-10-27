@@ -2,6 +2,21 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { chromium } from "playwright-core";
 
+let pdfCompileQueue: Promise<unknown> = Promise.resolve();
+
+/**
+ * Serializes PDF compilation operations over the shared CloakBrowser CDP instance
+ * so concurrent invocations do not contend on CDP contexts.
+ */
+function withPdfMutex<T>(fn: () => Promise<T>): Promise<T> {
+  const next = pdfCompileQueue.then(fn, fn);
+  pdfCompileQueue = next.then(
+    () => undefined,
+    () => undefined
+  );
+  return next;
+}
+
 /**
  * Compiles an ATS-clean HTML or Markdown resume into a single-page PDF using
  * Career-Ops's styling conventions and our CloakBrowser Chromium CDP server.
@@ -12,20 +27,27 @@ export async function compileAtsPdfViaCloakBrowser(params: {
   cdpUrl?: string;
   outputDir?: string;
 }): Promise<{ pdfPath: string; bytes: number }> {
-  const cdpUrl =
-    params.cdpUrl || process.env.CLOAKBROWSER_CDP_URL || "http://cloakbrowser:9222";
-  const outputDir =
-    params.outputDir || process.env.SHARED_RESUMES_DIR || "/app/shared/resumes";
+  return withPdfMutex(async () => {
+    const cdpUrl =
+      params.cdpUrl ||
+      process.env.CLOAKBROWSER_CDP_URL ||
+      "http://cloakbrowser:9222";
+    const outputDir =
+      params.outputDir ||
+      process.env.SHARED_RESUMES_DIR ||
+      "/app/shared/resumes";
 
-  await fs.mkdir(outputDir, { recursive: true });
-  const safeName = params.outputFilename
-    .replace(/[^a-zA-Z0-9._-]/g, "_")
-    .replace(/\.pdf$/i, "");
-  const pdfPath = path.join(outputDir, `${safeName}.pdf`);
+    await fs.mkdir(outputDir, { recursive: true });
+    const safeName =
+      params.outputFilename
+        .replace(/[^a-zA-Z0-9._-]/g, "_")
+        .replace(/\.pdf$/i, "") || "Resume";
+    const pdfPath = path.join(outputDir, `${safeName}.pdf`);
+    const tmpPath = `${pdfPath}.tmp-${process.pid}-${Date.now()}`;
 
-  const fullHtml = params.htmlContent.includes("<html")
-    ? params.htmlContent
-    : `<!DOCTYPE html>
+    const fullHtml = params.htmlContent.includes("<html")
+      ? params.htmlContent
+      : `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="utf-8" />
@@ -52,20 +74,29 @@ ${params.htmlContent}
 </body>
 </html>`;
 
-  const browser = await chromium.connectOverCDP(cdpUrl);
-  try {
+    const browser = await chromium.connectOverCDP(cdpUrl, { timeout: 15_000 });
     const context = await browser.newContext();
-    const page = await context.newPage();
-    await page.setContent(fullHtml, { waitUntil: "networkidle" });
-    const pdfBuffer = await page.pdf({
-      format: "Letter",
-      printBackground: true,
-      margin: { top: "0.45in", bottom: "0.45in", left: "0.5in", right: "0.5in" },
-    });
-    await fs.writeFile(pdfPath, pdfBuffer);
-    await context.close();
-    return { pdfPath, bytes: pdfBuffer.byteLength };
-  } finally {
-    await browser.close();
-  }
+    try {
+      const page = await context.newPage();
+      await page.setContent(fullHtml, {
+        waitUntil: "domcontentloaded",
+        timeout: 15_000,
+      });
+      const pdfBuffer = await page.pdf({
+        format: "Letter",
+        printBackground: true,
+        margin: {
+          top: "0.45in",
+          bottom: "0.45in",
+          left: "0.5in",
+          right: "0.5in",
+        },
+      });
+      await fs.writeFile(tmpPath, pdfBuffer);
+      await fs.rename(tmpPath, pdfPath);
+      return { pdfPath, bytes: pdfBuffer.byteLength };
+    } finally {
+      await context.close().catch(() => undefined);
+    }
+  });
 }

@@ -16,14 +16,13 @@ env:
 
 jobs:
   # ============================================================================
-  # 1. Unit Test @job-bot/jobbot-mcp (Vault, AES-256-GCM, IMAP OTP, Captcha)
+  # 1. Unit Test @job-bot/jobbot-mcp & Verify Upstream Web Patch
   # ============================================================================
   test-mcp:
-    name: Test jobbot-mcp
+    name: Test jobbot-mcp & Web Patch
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: mcp/jobbot-mcp
+    permissions:
+      contents: read
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -35,17 +34,23 @@ jobs:
           cache: "npm"
           cache-dependency-path: mcp/jobbot-mcp/package-lock.json
 
-      - name: Install dependencies
+      - name: Install MCP dependencies
+        working-directory: mcp/jobbot-mcp
         run: npm ci
 
-      - name: Build TypeScript
+      - name: Build MCP TypeScript
+        working-directory: mcp/jobbot-mcp
         run: npm run build
 
-      - name: Run Unit Tests
+      - name: Run MCP Unit Tests
+        working-directory: mcp/jobbot-mcp
         run: npm test
 
+      - name: Verify patch-origin.py against pinned suxrobGM/jobpilot commit
+        run: python3 docker/web/patch-origin.py --dry-run
+
   # ============================================================================
-  # 2. Build & Push All 5 Prepackaged Images to GitHub Container Registry
+  # 2. Build & Push All 6 Prepackaged Images to GitHub Container Registry
   # ============================================================================
   build-and-push:
     name: Build & Push (${{ matrix.image.name }})
@@ -61,18 +66,21 @@ jobs:
           - name: postgres
             context: ./docker/postgres
             dockerfile: ./docker/postgres/Dockerfile
-          - name: nginx
-            context: ./docker/nginx
-            dockerfile: ./docker/nginx/Dockerfile
-          - name: cloakbrowser
-            context: ./docker/cloakbrowser
-            dockerfile: ./docker/cloakbrowser/Dockerfile
+          - name: api
+            context: ./docker/api
+            dockerfile: ./docker/api/Dockerfile
           - name: web
             context: ./docker/web
             dockerfile: ./docker/web/Dockerfile
+          - name: cloakbrowser
+            context: ./docker/cloakbrowser
+            dockerfile: ./docker/cloakbrowser/Dockerfile
           - name: terminal
             context: .
             dockerfile: ./docker/terminal/Dockerfile
+          - name: nginx
+            context: ./docker/nginx
+            dockerfile: ./docker/nginx/Dockerfile
 
     steps:
       - name: Checkout repository

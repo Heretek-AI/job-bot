@@ -13,7 +13,7 @@ services:
   # 1. PostgreSQL 16 (Prepackaged with ATS Password Vault & IMAP Sync schema)
   # ============================================================================
   postgres:
-    image: ghcr.io/${GHCR_REPO:-heretek-ai/job-bot}/postgres:latest
+    image: ghcr.io/${GHCR_REPO:-heretek-ai/job-bot}/postgres:${IMAGE_TAG:-latest}
     build:
       context: ./docker/postgres
       dockerfile: Dockerfile
@@ -24,6 +24,8 @@ services:
       POSTGRES_DB: ${POSTGRES_DB:-jobpilot}
     volumes:
       - postgres-data:/var/lib/postgresql/data
+    networks:
+      - app-net
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-jobpilot} -d ${POSTGRES_DB:-jobpilot}"]
       interval: 10s
@@ -35,38 +37,79 @@ services:
   # 2. Automatic Prisma Database Schema Migration (JobPilot API)
   # ============================================================================
   db-migrate:
-    image: ghcr.io/suxrobgm/jobpilot/api:latest
+    image: ghcr.io/${GHCR_REPO:-heretek-ai/job-bot}/api:${IMAGE_TAG:-latest}
+    build:
+      context: ./docker/api
+      dockerfile: Dockerfile
     env_file: .env
     environment:
-      DATABASE_URL: ${DATABASE_URL:-postgresql://jobpilot:jobpilot_secret_password@postgres:5432/jobpilot}
+      DATABASE_URL: ${DATABASE_URL:-postgresql://${POSTGRES_USER:-jobpilot}:${POSTGRES_PASSWORD:-jobpilot_secret_password}@postgres:5432/${POSTGRES_DB:-jobpilot}}
+    networks:
+      - app-net
     depends_on:
       postgres:
         condition: service_healthy
-    command: ["bunx", "prisma", "db", "push", "--accept-data-loss", "--skip-generate"]
+    command: ["bunx", "prisma", "db", "push", "--skip-generate"]
     restart: "no"
 
   # ============================================================================
-  # 3. JobPilot API Backend (Bun + Elysia + Prisma)
+  # 3. Vault Schema Initialization (Runs after Prisma push so tables are preserved)
+  # ============================================================================
+  vault-init:
+    image: ghcr.io/${GHCR_REPO:-heretek-ai/job-bot}/postgres:${IMAGE_TAG:-latest}
+    build:
+      context: ./docker/postgres
+      dockerfile: Dockerfile
+    environment:
+      PGPASSWORD: ${POSTGRES_PASSWORD:-jobpilot_secret_password}
+    networks:
+      - app-net
+    depends_on:
+      postgres:
+        condition: service_healthy
+      db-migrate:
+        condition: service_completed_successfully
+    command:
+      - "psql"
+      - "-h"
+      - "postgres"
+      - "-U"
+      - "${POSTGRES_USER:-jobpilot}"
+      - "-d"
+      - "${POSTGRES_DB:-jobpilot}"
+      - "-v"
+      - "ON_ERROR_STOP=1"
+      - "-f"
+      - "/usr/local/share/jobbot/init-vault.sql"
+    restart: "no"
+
+  # ============================================================================
+  # 4. JobPilot API Backend (Bun + Elysia + Prisma)
   # ============================================================================
   api:
-    image: ghcr.io/suxrobgm/jobpilot/api:latest
+    image: ghcr.io/${GHCR_REPO:-heretek-ai/job-bot}/api:${IMAGE_TAG:-latest}
+    build:
+      context: ./docker/api
+      dockerfile: Dockerfile
     restart: unless-stopped
     env_file: .env
     environment:
       NODE_ENV: production
       PORT: 4101
-      DATABASE_URL: ${DATABASE_URL:-postgresql://jobpilot:jobpilot_secret_password@postgres:5432/jobpilot}
+      DATABASE_URL: ${DATABASE_URL:-postgresql://${POSTGRES_USER:-jobpilot}:${POSTGRES_PASSWORD:-jobpilot_secret_password}@postgres:5432/${POSTGRES_DB:-jobpilot}}
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:8080,http://127.0.0.1:8080,http://localhost:4100}
       APP_URL: ${APP_URL:-http://localhost:8080}
     ports:
-      - "${API_PORT:-4101}:4101"
+      - "127.0.0.1:${API_PORT:-4101}:4101"
     volumes:
       - api-storage:/app/apps/api/storage
       - shared-workspace:/app/shared
+    networks:
+      - app-net
     depends_on:
       postgres:
         condition: service_healthy
-      db-migrate:
+      vault-init:
         condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "bun", "-e", "fetch('http://localhost:4101/api/health').then((r) => process.exit(r.ok ? 0 : 1), () => process.exit(1))"]
@@ -76,10 +119,10 @@ services:
       start_period: 20s
 
   # ============================================================================
-  # 4. JobPilot Web UI (Prepackaged & Origin-Agnostic Next.js Standalone)
+  # 5. JobPilot Web UI (Prepackaged & Origin-Agnostic Next.js Standalone)
   # ============================================================================
   web:
-    image: ghcr.io/${GHCR_REPO:-heretek-ai/job-bot}/web:latest
+    image: ghcr.io/${GHCR_REPO:-heretek-ai/job-bot}/web:${IMAGE_TAG:-latest}
     build:
       context: ./docker/web
       dockerfile: Dockerfile
@@ -90,7 +133,9 @@ services:
       HOSTNAME: 0.0.0.0
       INTERNAL_API_URL: http://api:4101
     ports:
-      - "${WEB_PORT:-4100}:4100"
+      - "127.0.0.1:${WEB_PORT:-4100}:4100"
+    networks:
+      - app-net
     depends_on:
       api:
         condition: service_healthy
@@ -102,10 +147,10 @@ services:
       start_period: 15s
 
   # ============================================================================
-  # 5. CloakBrowser: C++-Patched Stealth Chromium (CDP + Persistent Password Store)
+  # 6. CloakBrowser: C++-Patched Stealth Chromium (Isolated on browser-net)
   # ============================================================================
   cloakbrowser:
-    image: ghcr.io/${GHCR_REPO:-heretek-ai/job-bot}/cloakbrowser:latest
+    image: ghcr.io/${GHCR_REPO:-heretek-ai/job-bot}/cloakbrowser:${IMAGE_TAG:-latest}
     build:
       context: ./docker/cloakbrowser
       dockerfile: Dockerfile
@@ -116,28 +161,23 @@ services:
       CLOAK_LOCALE: ${CLOAKBROWSER_LOCALE:-en-US}
       CLOAK_PROXY: ${BROWSER_PROXY_URL:-}
       CDP_PORT: "9222"
-    ports:
-      - "127.0.0.1:9222:9222"
     volumes:
       - browser-profile:/data/profile
       - shared-workspace:/app/shared
+    networks:
+      - browser-net
     healthcheck:
-      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:9222/json/version || exit 1"]
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:9223/json/version >/dev/null && curl -fsS -H 'Host: cloakbrowser:9222' http://127.0.0.1:9222/json/version >/dev/null || exit 1"]
       interval: 15s
       timeout: 5s
       retries: 5
       start_period: 15s
 
   # ============================================================================
-  # 6. Prepackaged Autonomous Terminal Worker
-  #    - JobPilot.Terminal (.NET host on :4102)
-  #    - Claude Code CLI wired to OpenCode (ANTHROPIC_* env vars)
-  #    - Playwright MCP -> CloakBrowser CDP (:9222) + Invisible Playwright Firefox MCP
-  #    - Career-Ops ATS Scanner & HTML->PDF Generator
-  #    - jobbot-mcp (Gmail IMAP 2FA/OTP + ATS Password Vault + Captcha Solver)
+  # 7. Prepackaged Autonomous Terminal Worker
   # ============================================================================
   terminal:
-    image: ghcr.io/${GHCR_REPO:-heretek-ai/job-bot}/terminal:latest
+    image: ghcr.io/${GHCR_REPO:-heretek-ai/job-bot}/terminal:${IMAGE_TAG:-latest}
     build:
       context: .
       dockerfile: ./docker/terminal/Dockerfile
@@ -147,7 +187,8 @@ services:
     environment:
       JOBPILOT_API: http://api:4101
       JOBPILOT_WEB: http://web:4100
-      DATABASE_URL: ${DATABASE_URL:-postgresql://jobpilot:jobpilot_secret_password@postgres:5432/jobpilot}
+      JOBPILOT_API_TOKEN: ${JOBPILOT_API_TOKEN:-}
+      DATABASE_URL: ${DATABASE_URL:-postgresql://${POSTGRES_USER:-jobpilot}:${POSTGRES_PASSWORD:-jobpilot_secret_password}@postgres:5432/${POSTGRES_DB:-jobpilot}}
       CLOAKBROWSER_CDP_URL: http://cloakbrowser:9222
       ANTHROPIC_BASE_URL: ${ANTHROPIC_BASE_URL:-https://opencode.ai/inference/anthropic}
       ANTHROPIC_AUTH_TOKEN: ${ANTHROPIC_AUTH_TOKEN}
@@ -155,12 +196,15 @@ services:
       ANTHROPIC_DEFAULT_SONNET_MODEL: ${ANTHROPIC_DEFAULT_SONNET_MODEL:-claude-sonnet-5-5}
       ANTHROPIC_DEFAULT_HAIKU_MODEL: ${ANTHROPIC_DEFAULT_HAIKU_MODEL:-claude-haiku-5-5}
     ports:
-      - "${TERMINAL_PORT:-4102}:4102"
+      - "127.0.0.1:${TERMINAL_PORT:-4102}:4102"
     volumes:
       - terminal-data:/root/.jobpilot
       - claude-data:/root/.claude
       - api-storage:/app/apps/api/storage
       - shared-workspace:/app/shared
+    networks:
+      - app-net
+      - browser-net
     depends_on:
       api:
         condition: service_healthy
@@ -174,16 +218,18 @@ services:
       start_period: 25s
 
   # ============================================================================
-  # 7. Prepackaged Nginx Single-Origin Reverse Proxy (:8080)
+  # 8. Prepackaged Nginx Single-Origin Reverse Proxy (:8080)
   # ============================================================================
   nginx:
-    image: ghcr.io/${GHCR_REPO:-heretek-ai/job-bot}/nginx:latest
+    image: ghcr.io/${GHCR_REPO:-heretek-ai/job-bot}/nginx:${IMAGE_TAG:-latest}
     build:
       context: ./docker/nginx
       dockerfile: Dockerfile
     restart: unless-stopped
     ports:
       - "${PUBLIC_PORT:-8080}:8080"
+    networks:
+      - app-net
     depends_on:
       web:
         condition: service_healthy
@@ -191,6 +237,18 @@ services:
         condition: service_healthy
       terminal:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8080/api/health || exit 1"]
+      interval: 20s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+networks:
+  app-net:
+    driver: bridge
+  browser-net:
+    driver: bridge
 
 volumes:
   postgres-data:

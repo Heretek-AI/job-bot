@@ -12,7 +12,7 @@ export interface CaptchaSolveResult {
 }
 
 /**
- * Layer 2 CAPTCHA token solver fallback (CapSolver / 2Captcha)
+ * Layer 2 CAPTCHA token solver fallback (CapSolver / 2Captcha).
  * Triggered only when an ATS form presents a hard image-grid challenge that survives
  * Layer 1 (CloakBrowser C++-patched Chromium + native checkbox click).
  */
@@ -38,6 +38,9 @@ export async function solveCaptchaWithTokenService(
   };
 }
 
+/**
+ * Submits and polls a CAPTCHA task via the CapSolver JSON API with per-request timeouts.
+ */
 async function solveViaCapSolver(
   apiKey: string,
   req: CaptchaSolveRequest
@@ -49,144 +52,186 @@ async function solveViaCapSolver(
     turnstile: "AntiTurnstileTaskProxyLess",
   };
 
-  const createResp = await fetch("https://api.capsolver.com/createTask", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      clientKey: apiKey,
-      task: {
-        type: taskTypeMap[req.captchaType],
-        websiteURL: req.pageUrl,
-        websiteKey: req.siteKey,
-      },
-    }),
-  });
-
-  const createData = (await createResp.json()) as {
-    errorId?: number;
-    errorDescription?: string;
-    taskId?: string;
-  };
-
-  if (createData.errorId || !createData.taskId) {
-    return {
-      solved: false,
-      provider: "capsolver",
-      token: null,
-      error: createData.errorDescription || "Failed to create CapSolver task",
-    };
-  }
-
-  for (let i = 0; i < 24; i++) {
-    await new Promise((r) => setTimeout(r, 3000));
-    const pollResp = await fetch("https://api.capsolver.com/getTaskResult", {
+  try {
+    const createResp = await fetch("https://api.capsolver.com/createTask", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         clientKey: apiKey,
-        taskId: createData.taskId,
+        task: {
+          type: taskTypeMap[req.captchaType],
+          websiteURL: req.pageUrl,
+          websiteKey: req.siteKey,
+        },
       }),
+      signal: AbortSignal.timeout(15_000),
     });
-    const pollData = (await pollResp.json()) as {
-      status?: string;
-      solution?: { gRecaptchaResponse?: string; token?: string };
+
+    const createData = (await createResp.json()) as {
+      errorId?: number;
       errorDescription?: string;
+      taskId?: string;
     };
 
-    if (pollData.status === "ready") {
-      const token =
-        pollData.solution?.gRecaptchaResponse || pollData.solution?.token || null;
-      return {
-        solved: Boolean(token),
-        provider: "capsolver",
-        token,
-      };
-    }
-    if (pollData.status === "failed") {
+    if (createData.errorId || !createData.taskId) {
       return {
         solved: false,
         provider: "capsolver",
         token: null,
-        error: pollData.errorDescription || "CapSolver task failed",
+        error: createData.errorDescription || "Failed to create CapSolver task",
       };
     }
-  }
 
-  return {
-    solved: false,
-    provider: "capsolver",
-    token: null,
-    error: "CapSolver timed out after 72 seconds",
-  };
+    for (let i = 0; i < 24; i++) {
+      await new Promise((r) => setTimeout(r, 3000));
+      const pollResp = await fetch("https://api.capsolver.com/getTaskResult", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          clientKey: apiKey,
+          taskId: createData.taskId,
+        }),
+        signal: AbortSignal.timeout(15_000),
+      });
+      const pollData = (await pollResp.json()) as {
+        status?: string;
+        solution?: { gRecaptchaResponse?: string; token?: string };
+        errorDescription?: string;
+      };
+
+      if (pollData.status === "ready") {
+        const token =
+          pollData.solution?.gRecaptchaResponse ||
+          pollData.solution?.token ||
+          null;
+        return {
+          solved: Boolean(token),
+          provider: "capsolver",
+          token,
+        };
+      }
+      if (pollData.status === "failed") {
+        return {
+          solved: false,
+          provider: "capsolver",
+          token: null,
+          error: pollData.errorDescription || "CapSolver task failed",
+        };
+      }
+    }
+
+    return {
+      solved: false,
+      provider: "capsolver",
+      token: null,
+      error: "CapSolver timed out after 72 seconds",
+    };
+  } catch (err) {
+    return {
+      solved: false,
+      provider: "capsolver",
+      token: null,
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
 }
 
+/**
+ * Submits and polls a CAPTCHA task via the 2Captcha API v2 JSON endpoint (sending key in POST body).
+ */
 async function solveViaTwoCaptcha(
   apiKey: string,
   req: CaptchaSolveRequest
 ): Promise<CaptchaSolveResult> {
-  const methodMap: Record<CaptchaSolveRequest["captchaType"], string> = {
-    recaptcha_v2: "userrecaptcha",
-    recaptcha_v3: "userrecaptcha",
-    hcaptcha: "hcaptcha",
-    turnstile: "turnstile",
+  const typeMap: Record<CaptchaSolveRequest["captchaType"], string> = {
+    recaptcha_v2: "RecaptchaV2TaskProxyless",
+    recaptcha_v3: "RecaptchaV3TaskProxyless",
+    hcaptcha: "HCaptchaTaskProxyless",
+    turnstile: "TurnstileTaskProxyless",
   };
 
-  const params = new URLSearchParams({
-    key: apiKey,
-    method: methodMap[req.captchaType],
-    pageurl: req.pageUrl,
-    json: "1",
-  });
-  if (req.captchaType === "hcaptcha" || req.captchaType === "turnstile") {
-    params.set("sitekey", req.siteKey);
-  } else {
-    params.set("googlekey", req.siteKey);
-    if (req.captchaType === "recaptcha_v3") {
-      params.set("version", "v3");
-    }
-  }
+  try {
+    const createResp = await fetch("https://api.2captcha.com/createTask", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        clientKey: apiKey,
+        task: {
+          type: typeMap[req.captchaType],
+          websiteURL: req.pageUrl,
+          websiteKey: req.siteKey,
+        },
+      }),
+      signal: AbortSignal.timeout(15_000),
+    });
 
-  const inResp = await fetch(`https://2captcha.com/in.php?${params.toString()}`);
-  const inData = (await inResp.json()) as { status: number; request: string };
-  if (inData.status !== 1) {
-    return {
-      solved: false,
-      provider: "2captcha",
-      token: null,
-      error: inData.request,
+    const createData = (await createResp.json()) as {
+      errorId?: number;
+      errorDescription?: string;
+      taskId?: number | string;
     };
-  }
 
-  const taskId = inData.request;
-  for (let i = 0; i < 24; i++) {
-    await new Promise((r) => setTimeout(r, 4000));
-    const resResp = await fetch(
-      `https://2captcha.com/res.php?key=${encodeURIComponent(
-        apiKey
-      )}&action=get&id=${encodeURIComponent(taskId)}&json=1`
-    );
-    const resData = (await resResp.json()) as { status: number; request: string };
-    if (resData.status === 1) {
-      return {
-        solved: true,
-        provider: "2captcha",
-        token: resData.request,
-      };
-    }
-    if (resData.request !== "CAPCHA_NOT_READY") {
+    if (createData.errorId || !createData.taskId) {
       return {
         solved: false,
         provider: "2captcha",
         token: null,
-        error: resData.request,
+        error: createData.errorDescription || "Failed to create 2Captcha task",
       };
     }
-  }
 
-  return {
-    solved: false,
-    provider: "2captcha",
-    token: null,
-    error: "2Captcha timed out",
-  };
+    for (let i = 0; i < 24; i++) {
+      await new Promise((r) => setTimeout(r, 4000));
+      const resResp = await fetch("https://api.2captcha.com/getTaskResult", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          clientKey: apiKey,
+          taskId: createData.taskId,
+        }),
+        signal: AbortSignal.timeout(15_000),
+      });
+      const resData = (await resResp.json()) as {
+        errorId?: number;
+        errorDescription?: string;
+        status?: string;
+        solution?: { gRecaptchaResponse?: string; token?: string };
+      };
+
+      if (resData.errorId) {
+        return {
+          solved: false,
+          provider: "2captcha",
+          token: null,
+          error: resData.errorDescription || "2Captcha error",
+        };
+      }
+
+      if (resData.status === "ready") {
+        const token =
+          resData.solution?.gRecaptchaResponse ||
+          resData.solution?.token ||
+          null;
+        return {
+          solved: Boolean(token),
+          provider: "2captcha",
+          token,
+        };
+      }
+    }
+
+    return {
+      solved: false,
+      provider: "2captcha",
+      token: null,
+      error: "2Captcha timed out",
+    };
+  } catch (err) {
+    return {
+      solved: false,
+      provider: "2captcha",
+      token: null,
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
 }

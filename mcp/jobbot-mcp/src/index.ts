@@ -6,6 +6,7 @@ import {
   getOrCreateAtsCredentials,
   saveAtsCredentials,
   listAtsCredentials,
+  validateMasterSecret,
 } from "./vault.js";
 import {
   waitForVerificationEmail,
@@ -16,8 +17,12 @@ import { compileAtsPdfViaCloakBrowser } from "./career-ops.js";
 
 const { Pool } = pg;
 
+const masterSecret = validateMasterSecret(process.env.ATS_VAULT_MASTER_SECRET);
 const dbUrl = process.env.DATABASE_URL?.trim();
 const pool = dbUrl ? new Pool({ connectionString: dbUrl }) : null;
+pool?.on("error", (err) => {
+  console.error("[jobbot-mcp] Unexpected PostgreSQL idle client error:", err);
+});
 
 const server = new McpServer({
   name: "jobbot-mcp",
@@ -29,15 +34,28 @@ server.tool(
   "ats_get_or_create_credentials",
   "Retrieves an existing login or generates & saves a new AES-256-GCM encrypted login credential for a specific ATS tenant domain (e.g., nvidia.wd5.myworkdayjobs.com, icims.com, taleo.net).",
   {
-    portalUrl: z.string().describe("Full URL or hostname of the ATS login/registration page"),
-    companyName: z.string().optional().describe("Company name for this ATS portal"),
-    emailOverride: z.string().optional().describe("Optional email override; defaults to GMAIL_ADDRESS"),
+    portalUrl: z
+      .string()
+      .trim()
+      .min(1)
+      .describe("Full URL or hostname of the ATS login/registration page"),
+    companyName: z
+      .string()
+      .trim()
+      .optional()
+      .describe("Company name for this ATS portal"),
+    emailOverride: z
+      .string()
+      .trim()
+      .email()
+      .optional()
+      .describe("Optional email override; defaults to GMAIL_ADDRESS"),
   },
   async ({ portalUrl, companyName, emailOverride }) => {
-    const email = emailOverride || process.env.GMAIL_ADDRESS || "applicant@example.com";
-    const masterSecret =
-      process.env.ATS_VAULT_MASTER_SECRET || "default-jobbot-master-secret-32b!";
-    const passwordPrefix = process.env.ATS_DEFAULT_PASSWORD_PREFIX || "JobBot#2026!";
+    const email =
+      emailOverride || process.env.GMAIL_ADDRESS || "applicant@example.com";
+    const passwordPrefix =
+      process.env.ATS_DEFAULT_PASSWORD_PREFIX || "JobBot#2026!";
 
     const creds = await getOrCreateAtsCredentials(pool, {
       portalUrl,
@@ -63,10 +81,26 @@ server.tool(
   "ats_save_credentials",
   "Explicitly saves or updates a password for an ATS portal or job board in the encrypted Postgres vault AND syncs it to JobPilot's /api/credentials store. Call this after creating an account, resetting a password, or when the user provides a login.",
   {
-    portalUrl: z.string().describe("Full URL or hostname of the ATS portal or job board"),
-    email: z.string().optional().describe("Account email address; defaults to GMAIL_ADDRESS"),
-    password: z.string().describe("The password to save and encrypt"),
-    companyName: z.string().optional().describe("Company or board name"),
+    portalUrl: z
+      .string()
+      .trim()
+      .min(1)
+      .describe("Full URL or hostname of the ATS portal or job board"),
+    email: z
+      .string()
+      .trim()
+      .email()
+      .optional()
+      .describe("Account email address; defaults to GMAIL_ADDRESS"),
+    password: z
+      .string()
+      .min(1)
+      .describe("The password to save and encrypt"),
+    companyName: z
+      .string()
+      .trim()
+      .optional()
+      .describe("Company or board name"),
     accountVerified: z
       .boolean()
       .optional()
@@ -74,9 +108,8 @@ server.tool(
       .describe("Whether the account has been verified/activated"),
   },
   async ({ portalUrl, email, password, companyName, accountVerified }) => {
-    const effectiveEmail = email || process.env.GMAIL_ADDRESS || "applicant@example.com";
-    const masterSecret =
-      process.env.ATS_VAULT_MASTER_SECRET || "default-jobbot-master-secret-32b!";
+    const effectiveEmail =
+      email || process.env.GMAIL_ADDRESS || "applicant@example.com";
 
     const saved = await saveAtsCredentials(pool, {
       portalUrl,
@@ -123,9 +156,13 @@ server.tool(
   {
     boardDomain: z
       .string()
+      .trim()
+      .min(1)
       .describe("Target ATS or company domain (e.g., workday.com, greenhouse.io, ashbyhq.com)"),
     timeoutSeconds: z
       .number()
+      .min(5)
+      .max(120)
       .optional()
       .default(45)
       .describe("Maximum seconds to wait for the verification email (5-120)"),
@@ -154,9 +191,11 @@ server.tool(
   {
     sinceHours: z
       .number()
+      .min(1)
+      .max(720)
       .optional()
       .default(24)
-      .describe("How many hours back to scan in the inbox"),
+      .describe("How many hours back to scan in the inbox (1-720)"),
   },
   async ({ sinceHours }) => {
     const updates = await pollRecentJobEmails(sinceHours);
@@ -176,8 +215,16 @@ server.tool(
   "solve_captcha_challenge",
   "Solves a reCAPTCHA v2/v3, hCaptcha, or Cloudflare Turnstile challenge via CapSolver/2Captcha token service if CloakBrowser C++ stealth checkbox click triggers an image challenge.",
   {
-    pageUrl: z.string().describe("Full URL of the page containing the CAPTCHA"),
-    siteKey: z.string().describe("The data-sitekey or k= parameter of the CAPTCHA widget"),
+    pageUrl: z
+      .string()
+      .trim()
+      .url()
+      .describe("Full URL of the page containing the CAPTCHA"),
+    siteKey: z
+      .string()
+      .trim()
+      .min(1)
+      .describe("The data-sitekey or k= parameter of the CAPTCHA widget"),
     captchaType: z
       .enum(["recaptcha_v2", "recaptcha_v3", "hcaptcha", "turnstile"])
       .describe("Type of CAPTCHA widget"),
@@ -204,9 +251,17 @@ server.tool(
   "career_ops_compile_pdf",
   "Compiles tailored resume HTML into an ATS-friendly single-page PDF in /app/shared/resumes using the CloakBrowser Chromium CDP instance.",
   {
-    htmlContent: z.string().describe("Tailored resume body in clean HTML"),
+    htmlContent: z
+      .string()
+      .trim()
+      .min(1)
+      .max(500_000)
+      .describe("Tailored resume body in clean HTML (max 500KB)"),
     outputFilename: z
       .string()
+      .trim()
+      .min(1)
+      .max(128)
       .describe("Target filename (e.g., Derek_Resume_Stripe_Backend.pdf)"),
   },
   async ({ htmlContent, outputFilename }) => {
@@ -225,6 +280,9 @@ server.tool(
   }
 );
 
+/**
+ * Starts the stdio MCP server transport and connects all registered tools.
+ */
 async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);

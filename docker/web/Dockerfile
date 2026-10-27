@@ -1,11 +1,14 @@
-# Builds a prepackaged, origin-agnostic suxrobGM/jobpilot Web UI image.
+# Builds a prepackaged, origin-agnostic suxrobGM/jobpilot Web UI image from a pinned commit.
 # Browser requests dynamically use window.location.origin (/api and /terminal) via Nginx,
 # so one prebuilt GHCR image works on ANY remote IP, Tailscale hostname, or domain!
 FROM oven/bun:1-slim AS build
 WORKDIR /app
 
 RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates python3 && rm -rf /var/lib/apt/lists/*
-RUN git clone --depth 1 https://github.com/suxrobGM/jobpilot.git /app
+
+ARG JOBPILOT_COMMIT=08fa978ecac0da68b0ee5694c93c0d94f18b4d9f
+RUN git clone https://github.com/suxrobGM/jobpilot.git /app \
+    && git checkout "${JOBPILOT_COMMIT}"
 
 COPY patch-origin.py /tmp/patch-origin.py
 RUN python3 /tmp/patch-origin.py
