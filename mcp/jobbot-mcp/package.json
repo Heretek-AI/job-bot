@@ -1,0 +1,27 @@
+{
+  "name": "@job-bot/jobbot-mcp",
+  "version": "1.0.0",
+  "description": "Self-hosted Job-Bot MCP Server: Multi-Tenant ATS Password Vault, Gmail IMAP App-Password 2FA/OTP & Status Reader, Captcha Solver, and Career-Ops ATS/PDF Bridge",
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "test": "node --import tsx --test tests/*.test.ts"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.11.0",
+    "imapflow": "^1.0.168",
+    "mailparser": "^3.7.2",
+    "pg": "^8.14.1",
+    "playwright-core": "^1.51.0",
+    "zod": "^3.24.2"
+  },
+  "devDependencies": {
+    "@types/mailparser": "^3.4.6",
+    "@types/node": "^22.13.10",
+    "@types/pg": "^8.11.11",
+    "tsx": "^4.19.3",
+    "typescript": "^5.8.2"
+  }
+}

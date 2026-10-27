@@ -1,0 +1,124 @@
+name: Build & Publish Prepackaged Containers (GHCR)
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  # ============================================================================
+  # 1. Unit Test @job-bot/jobbot-mcp & Verify Upstream Web Patch
+  # ============================================================================
+  test-mcp:
+    name: Test jobbot-mcp & Web Patch
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: mcp/jobbot-mcp/package-lock.json
+
+      - name: Install MCP dependencies
+        working-directory: mcp/jobbot-mcp
+        run: npm ci
+
+      - name: Build MCP TypeScript
+        working-directory: mcp/jobbot-mcp
+        run: npm run build
+
+      - name: Run MCP Unit Tests
+        working-directory: mcp/jobbot-mcp
+        run: npm test
+
+      - name: Verify patch-origin.py against pinned suxrobGM/jobpilot commit
+        run: python3 docker/web/patch-origin.py --dry-run
+
+  # ============================================================================
+  # 2. Build & Push All 6 Prepackaged Images to GitHub Container Registry
+  # ============================================================================
+  build-and-push:
+    name: Build & Push (${{ matrix.image.name }})
+    needs: test-mcp
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        image:
+          - name: postgres
+            context: ./docker/postgres
+            dockerfile: ./docker/postgres/Dockerfile
+          - name: api
+            context: ./docker/api
+            dockerfile: ./docker/api/Dockerfile
+          - name: web
+            context: ./docker/web
+            dockerfile: ./docker/web/Dockerfile
+          - name: cloakbrowser
+            context: ./docker/cloakbrowser
+            dockerfile: ./docker/cloakbrowser/Dockerfile
+          - name: terminal
+            context: .
+            dockerfile: ./docker/terminal/Dockerfile
+          - name: nginx
+            context: ./docker/nginx
+            dockerfile: ./docker/nginx/Dockerfile
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Lowercase repository owner/name for GHCR
+        id: repo
+        run: |
+          echo "repo_lower=$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry (GHCR)
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract Docker metadata (tags & labels)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ steps.repo.outputs.repo_lower }}/${{ matrix.image.name }}
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=sha,prefix=sha-
+            type=semver,pattern={{version}}
+
+      - name: Build and push container image
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.image.context }}
+          file: ${{ matrix.image.dockerfile }}
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=${{ matrix.image.name }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.image.name }}

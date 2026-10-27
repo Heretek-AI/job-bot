@@ -7,3 +7,5 @@ shared/
 *.log
 .DS_Store
 .playwright-mcp/
+AUDIT_REPORT.md
+
