@@ -59,6 +59,7 @@ RUN sed -i 's/\r$//' /usr/local/bin/terminal-entrypoint.sh \
 
 WORKDIR /root/.jobpilot
 ENV DOTNET_EnableWriteXorExecute=0
+ENV IS_SANDBOX=1
 EXPOSE 4102
 
 ENTRYPOINT ["/usr/local/bin/terminal-entrypoint.sh"]

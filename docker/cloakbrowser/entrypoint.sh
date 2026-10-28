@@ -86,76 +86,98 @@ async def pipe(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> No
             pass
 
 async def handle_client(client_reader: asyncio.StreamReader, client_writer: asyncio.StreamWriter) -> None:
-    try:
-        header_bytes = await client_reader.readuntil(b"\r\n\r\n")
-    except Exception:
-        client_writer.close()
-        return
-
-    header_text = header_bytes.decode("latin1")
-    lines = header_text.split("\r\n")
-    caller_host = f"127.0.0.1:{EXTERNAL_PORT}"
-    is_websocket = False
-    new_lines = [lines[0]]
-
-    for line in lines[1:]:
-        if not line:
-            continue
-        lower = line.lower()
-        if lower.startswith("host:"):
-            caller_host = line.split(":", 1)[1].strip()
-            new_lines.append(f"Host: 127.0.0.1:{INTERNAL_PORT}")
-        else:
-            if lower.startswith("upgrade:") and "websocket" in lower:
-                is_websocket = True
-            new_lines.append(line)
-
-    rewritten_headers = ("\r\n".join(new_lines) + "\r\n\r\n").encode("latin1")
-
+    up_reader = None
+    up_writer = None
     try:
         up_reader, up_writer = await asyncio.open_connection("127.0.0.1", INTERNAL_PORT)
-    except Exception:
-        client_writer.close()
-        return
+        while True:
+            try:
+                header_bytes = await client_reader.readuntil(b"\r\n\r\n")
+            except Exception:
+                break
 
-    up_writer.write(rewritten_headers)
-    await up_writer.drain()
+            header_text = header_bytes.decode("latin1")
+            lines = [l.rstrip("\r") for l in header_text.split("\r\n") if l.rstrip("\r")]
+            if not lines:
+                break
 
-    if is_websocket:
-        await asyncio.gather(
-            pipe(client_reader, up_writer),
-            pipe(up_reader, client_writer),
-        )
-        return
+            caller_host = f"127.0.0.1:{EXTERNAL_PORT}"
+            is_websocket = False
+            req_content_length = 0
+            new_lines = [lines[0]]
 
-    try:
-        resp_header_bytes = await up_reader.readuntil(b"\r\n\r\n")
-        resp_header_text = resp_header_bytes.decode("latin1")
-        m = re.search(r"(?i)^content-length:\s*(\d+)\r?$", resp_header_text, re.M)
-        body = b""
-        if m:
-            length = int(m.group(1))
-            body = await up_reader.readexactly(length)
-        else:
-            body = await up_reader.read(65536)
+            for line in lines[1:]:
+                lower = line.lower()
+                if lower.startswith("host:"):
+                    caller_host = line.split(":", 1)[1].strip()
+                    new_lines.append(f"Host: 127.0.0.1:{INTERNAL_PORT}")
+                else:
+                    if lower.startswith("upgrade:") and "websocket" in lower:
+                        is_websocket = True
+                    elif lower.startswith("content-length:"):
+                        try:
+                            req_content_length = int(line.split(":", 1)[1].strip())
+                        except Exception:
+                            req_content_length = 0
+                    new_lines.append(line)
 
-        if b"127.0.0.1:9223" in body or b"localhost:9223" in body:
-            target_bytes = caller_host.encode("latin1")
-            body = body.replace(b"127.0.0.1:9223", target_bytes).replace(b"localhost:9223", target_bytes)
-            resp_header_text = re.sub(
-                r"(?i)^content-length:\s*\d+\r?$",
-                f"Content-Length: {len(body)}",
-                resp_header_text,
-                flags=re.M,
-            )
+            rewritten_headers = ("\r\n".join(new_lines) + "\r\n\r\n").encode("latin1")
+            req_body = b""
+            if req_content_length > 0:
+                req_body = await client_reader.readexactly(req_content_length)
 
-        client_writer.write(resp_header_text.encode("latin1") + body)
-        await client_writer.drain()
+            up_writer.write(rewritten_headers + req_body)
+            await up_writer.drain()
+
+            if is_websocket:
+                await asyncio.gather(
+                    pipe(client_reader, up_writer),
+                    pipe(up_reader, client_writer),
+                )
+                return
+
+            resp_header_bytes = await up_reader.readuntil(b"\r\n\r\n")
+            resp_header_text = resp_header_bytes.decode("latin1")
+            resp_lines = [l.rstrip("\r") for l in resp_header_text.split("\r\n") if l.rstrip("\r")]
+
+            length = None
+            for line in resp_lines[1:]:
+                if line.lower().startswith("content-length:"):
+                    try:
+                        length = int(line.split(":", 1)[1].strip())
+                    except Exception:
+                        length = None
+                    break
+
+            body = b""
+            if length is not None:
+                body = await up_reader.readexactly(length)
+            else:
+                body = await up_reader.read(65536)
+
+            if b"127.0.0.1:9223" in body or b"localhost:9223" in body:
+                target_bytes = caller_host.encode("latin1")
+                body = body.replace(b"127.0.0.1:9223", target_bytes).replace(b"localhost:9223", target_bytes)
+                resp_lines = [
+                    f"Content-Length: {len(body)}" if l.lower().startswith("content-length:") else l
+                    for l in resp_lines
+                ]
+
+            out_headers = ("\r\n".join(resp_lines) + "\r\n\r\n").encode("latin1")
+            client_writer.write(out_headers + body)
+            await client_writer.drain()
     except Exception:
         pass
     finally:
-        up_writer.close()
-        client_writer.close()
+        if up_writer is not None:
+            try:
+                up_writer.close()
+            except Exception:
+                pass
+        try:
+            client_writer.close()
+        except Exception:
+            pass
 
 async def main() -> None:
     server = await asyncio.start_server(handle_client, "0.0.0.0", EXTERNAL_PORT)
