@@ -163,29 +163,35 @@ services:
       start_period: 15s
 
   # ============================================================================
-  # 6. CloakBrowser: C++-Patched Stealth Chromium (Isolated on browser-net)
+  # 6. Stealthy Auto-Browse: Camoufox + OS-Level Input + noVNC (:5900)
   # ============================================================================
-  cloakbrowser:
-    image: ghcr.io/${GHCR_REPO:-heretek-ai/job-bot}/cloakbrowser:${IMAGE_TAG:-latest}
-    hostname: cloakbrowser
+  stealth-browser:
+    image: psyb0t/stealthy-auto-browse:latest
+    container_name: job-bot-stealth-browser-1
+    hostname: stealth-browser
     restart: unless-stopped
     shm_size: "2gb"
     environment:
-      TZ: ${CLOAKBROWSER_TIMEZONE:-America/New_York}
-      CLOAK_LOCALE: ${CLOAKBROWSER_LOCALE:-en-US}
-      CLOAK_PROXY: ${BROWSER_PROXY_URL:-}
-      CDP_PORT: "9222"
+      HTTP_LISTEN_PORT: 8080
+      VNC_LISTEN_PORT: 5900
+      VNC_SHOW_CURSOR: "true"
+      XVFB_RESOLUTION: ${XVFB_RESOLUTION:-1280x800}
+      TZ: ${TZ:-America/New_York}
+      PROXY_URL: ${BROWSER_PROXY_URL:-}
+    ports:
+      - "${VNC_PORT:-5900}:5900"
     volumes:
-      - browser-profile:/data/profile
+      - stealth-browser-data:/userdata
       - shared-workspace:/app/shared
     networks:
       - browser-net
+      - app-net
     healthcheck:
-      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:9223/json/version >/dev/null && curl -fsS -H 'Host: cloakbrowser:9222' http://127.0.0.1:9222/json/version >/dev/null || exit 1"]
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8080/health || exit 1"]
       interval: 15s
       timeout: 5s
       retries: 5
-      start_period: 15s
+      start_period: 20s
 
   # ============================================================================
   # 7. Prepackaged Autonomous Terminal Worker
@@ -202,7 +208,7 @@ services:
       JOBPILOT_WEB: http://web:4100
       JOBPILOT_API_TOKEN: ${JOBPILOT_API_TOKEN:-}
       DATABASE_URL: ${DATABASE_URL:-postgresql://${POSTGRES_USER:-jobpilot}:${POSTGRES_PASSWORD:-jobpilot_secret_password}@postgres:5432/${POSTGRES_DB:-jobpilot}}
-      CLOAKBROWSER_CDP_URL: http://cloakbrowser:9222
+      STEALTH_BROWSER_URL: http://stealth-browser:8080
       ANTHROPIC_BASE_URL: ${ANTHROPIC_BASE_URL:-https://opencode.ai/inference/anthropic}
       ANTHROPIC_AUTH_TOKEN: ${ANTHROPIC_AUTH_TOKEN}
       ANTHROPIC_DEFAULT_OPUS_MODEL: ${ANTHROPIC_DEFAULT_OPUS_MODEL:-claude-opus-5-5}
@@ -221,7 +227,7 @@ services:
     depends_on:
       api:
         condition: service_healthy
-      cloakbrowser:
+      stealth-browser:
         condition: service_healthy
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS http://localhost:4102/healthz || exit 1"]
@@ -263,7 +269,7 @@ networks:
 volumes:
   postgres-data:
   api-storage:
-  browser-profile:
+  stealth-browser-data:
   terminal-data:
   claude-data:
   shared-workspace:

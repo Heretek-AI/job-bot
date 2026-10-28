@@ -150,12 +150,12 @@ for target_path, default_root in (
         "Task",
         "Skill",
         "NotebookEdit",
-        "mcp__playwright__*",
-        "mcp__plugin_jobpilot_playwright__*",
+        "mcp__stealthy-auto-browse__*",
+        "mcp__plugin_jobpilot_stealthy-auto-browse__*",
         "mcp__jobbot-mcp__*",
         "mcp__plugin_jobpilot_jobbot-mcp__*",
-        "mcp__invisible-firefox__*",
-        "mcp__plugin_jobpilot_invisible-firefox__*",
+        "mcp__upwork__*",
+        "mcp__plugin_jobpilot_upwork__*",
     ]
     cfg["permissions"] = perms
     cfg.pop("autoMode", None)
@@ -198,7 +198,7 @@ proj = projects.get(install_dir)
 if not isinstance(proj, dict):
     proj = {}
 proj["hasTrustDialogAccepted"] = True
-proj["enabledMcpjsonServers"] = ["playwright", "jobbot-mcp"]
+proj["enabledMcpjsonServers"] = ["stealthy-auto-browse", "jobbot-mcp"]
 projects[install_dir] = proj
 state["projects"] = projects
 
@@ -208,13 +208,13 @@ for dest in (claude_json_path, persisted_json_path):
     os.chmod(dest, 0o600)
 PY
 
-# 3. Wire plugin/.mcp.json to CloakBrowser C++ Stealth Chromium over CDP + jobbot-mcp + optional Invisible Playwright Firefox
+# 3. Wire plugin/.mcp.json to stealthy-auto-browse Streamable HTTP MCP + jobbot-mcp
 python3 - <<'PY'
 import json, os
 
 install_dir = os.environ.get("JOBPILOT_INSTALL_DIR", "/root/.jobpilot")
 mcp_path = os.path.join(install_dir, "plugin", ".mcp.json")
-cdp_url = os.environ.get("CLOAKBROWSER_CDP_URL", "http://cloakbrowser:9222")
+stealth_url = os.environ.get("STEALTH_BROWSER_URL", "http://stealth-browser:8080").rstrip("/")
 
 mcp_env = {
     "DATABASE_URL": os.environ.get("DATABASE_URL", ""),
@@ -226,7 +226,7 @@ mcp_env = {
     "GMAIL_IMAP_PORT": os.environ.get("GMAIL_IMAP_PORT", "993"),
     "ATS_VAULT_MASTER_SECRET": os.environ.get("ATS_VAULT_MASTER_SECRET", ""),
     "ATS_DEFAULT_PASSWORD_PREFIX": os.environ.get("ATS_DEFAULT_PASSWORD_PREFIX", "JobBot#2026!"),
-    "CLOAKBROWSER_CDP_URL": cdp_url,
+    "STEALTH_BROWSER_URL": stealth_url,
     "CAPSOLVER_API_KEY": os.environ.get("CAPSOLVER_API_KEY", ""),
     "TWOCAPTCHA_API_KEY": os.environ.get("TWOCAPTCHA_API_KEY", ""),
     "CAREER_OPS_DIR": "/opt/career-ops",
@@ -236,23 +236,9 @@ if os.environ.get("JOBPILOT_API_TOKEN", "").strip():
     mcp_env["JOBPILOT_API_TOKEN"] = os.environ["JOBPILOT_API_TOKEN"].strip()
 
 mcp_servers = {
-    "playwright": {
-        "command": "playwright-mcp",
-        "args": [
-            "--cdp-endpoint",
-            cdp_url,
-            "--snapshot-mode",
-            "none",
-            *(
-                ["--init-page", "/usr/lib/node_modules/cloakbrowser-mcp/dist/runtime/humanize-init-page.cjs"]
-                if os.path.exists("/usr/lib/node_modules/cloakbrowser-mcp/dist/runtime/humanize-init-page.cjs")
-                else []
-            ),
-        ],
-        "env": {
-            "CLOAK_PLAYWRIGHT_MCP_HUMANIZE": os.environ.get("CLOAK_PLAYWRIGHT_MCP_HUMANIZE", "true"),
-            "CLOAK_PLAYWRIGHT_MCP_HUMAN_PRESET": os.environ.get("CLOAK_PLAYWRIGHT_MCP_HUMAN_PRESET", "default"),
-        },
+    "stealthy-auto-browse": {
+        "type": "http",
+        "url": f"{stealth_url}/mcp",
     },
     "jobbot-mcp": {
         "command": "node",
@@ -267,17 +253,11 @@ if os.environ.get("ENABLE_UPWORK_MCP", "false").lower() == "true":
         "url": "https://mcp.upwork.com/mcp"
     }
 
-if os.environ.get("ENABLE_INVISIBLE_PLAYWRIGHT_FIREFOX_MCP", "false").lower() == "true":
-    mcp_servers["invisible-firefox"] = {
-        "command": "uvx",
-        "args": ["invisible-playwright-mcp"]
-    }
-
 with open(mcp_path, "w", encoding="utf-8") as f:
     json.dump({"mcpServers": mcp_servers}, f, indent=2)
 os.chmod(mcp_path, 0o600)
 
-print(f"[terminal] Updated {mcp_path} with CloakBrowser CDP ({cdp_url}) and jobbot-mcp.")
+print(f"[terminal] Updated {mcp_path} with stealthy-auto-browse ({stealth_url}/mcp) and jobbot-mcp.")
 PY
 
 # 4. Pre-wire plugin/skills/_shared/auth.md, get-code, and apply skills for automatic password saving & IMAP OTPs
@@ -308,7 +288,9 @@ fi
 if [ -f "${PLUGIN_DIR}/skills/apply/SKILL.md" ] && ! grep -q "ats_get_or_create_credentials" "${PLUGIN_DIR}/skills/apply/SKILL.md"; then
   cat >> "${PLUGIN_DIR}/skills/apply/SKILL.md" << 'EOF'
 
-## Self-Hosted Job-Bot Extensions (ATS Password Vault & Career-Ops PDF)
+## Self-Hosted Job-Bot Extensions (ATS Password Vault, Stealth Browser & Career-Ops PDF)
+- **Browser Automation**: Use `stealthy-auto-browse` tools (`goto`, `click`, `fill`, `system_click`, `system_type`, `detect_challenge`, `wait_for_element`).
+- **Interactive VNC Live Assistance**: If a CAPTCHA, Cloudflare verification, or multi-factor prompt requires human assistance, inform the user they can view and interact with the live headed browser at port 5900 (e.g. `http://<host>:5900/` or VNC client).
 - **Creating & Saving Passwords**: Whenever an ATS portal (Workday, iCIMS, Taleo, etc.) requires login or registration, call `ats_get_or_create_credentials` to get/generate the login (`accountVerified: false`), and call `ats_save_credentials` with `accountVerified: true` once activation/login succeeds.
 - **Verification Codes**: For email 2FA or Workday account activation links, call `gmail_wait_for_verification_code` from `jobbot-mcp`.
 - **ATS-Clean PDF Generation**: Call `career_ops_compile_pdf` from `jobbot-mcp` to render an ATS-optimized single-page PDF into `/app/shared/resumes/`.

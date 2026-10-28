@@ -1,0 +1,241 @@
+# Setup
+
+## Authorized use reminder
+
+This skill is intended for authorized QA, compatibility testing, and defensive security research against sites you own or have written permission to test. Read the "Authorized use only" section of `SKILL.md` before configuring this for any non-trivial deployment.
+
+## Requirements
+
+- Docker
+- curl
+
+## Secure defaults: apply these first
+
+Before running anything beyond a throwaway local smoke test:
+
+1. **Bind to loopback.** Map ports as `-p 127.0.0.1:8080:8080` (and `127.0.0.1:5900:5900` if you need the viewer) so the API is not reachable from other machines on the network.
+2. **Set `AUTH_TOKEN` to a strong random value.** `-e AUTH_TOKEN=$(openssl rand -hex 32)`. Required as soon as the service is reachable beyond localhost. Pass it via `Authorization: Bearer <key>` headers.
+3. **Pull the image before you start.** `docker pull psyb0t/stealthy-auto-browse:latest` gets the current release. Pull again and recreate the container to upgrade.
+4. **Don't mount the docker socket.** Don't run with `--privileged`. Don't grant the container egress beyond what the test target needs (use a Docker network with restricted egress where supported).
+5. **Don't persist real session data.** If you mount `/userdata`, use a dedicated test account, encrypt the volume host-side if it leaves the machine, and shred (`rm -rf`) it when the test concludes.
+6. **Disable the noVNC viewer if you don't need it.** Don't publish port 5900. If you do publish it for local debugging, bind it to `127.0.0.1` and never expose it on a public interface. The viewer gives full keyboard/mouse control of the browser, including any logged-in sessions.
+
+## Quick start (localhost, no auth, for smoke tests only)
+
+```bash
+docker run -d --name browser \
+  -p 127.0.0.1:8080:8080 \
+  -p 127.0.0.1:5900:5900 \
+  psyb0t/stealthy-auto-browse:latest
+```
+
+**Verify:** `curl http://127.0.0.1:8080/health` returns `ok` when the browser is ready (~10s first boot).
+**Watch the browser:** `http://127.0.0.1:5900/` in your own browser.
+
+## Recommended run (auth enabled, hardened)
+
+```bash
+TOKEN=$(openssl rand -hex 32)
+echo "AUTH_TOKEN=$TOKEN" > .env.browser   # gitignored
+chmod 600 .env.browser
+
+docker run -d --name browser \
+  -p 127.0.0.1:8080:8080 \
+  --env-file .env.browser \
+  -e HTTP_LISTEN_HOST=0.0.0.0 \
+  --cap-drop=ALL \
+  --cap-add=SYS_ADMIN \
+  --security-opt=no-new-privileges \
+  --read-only \
+  --tmpfs /tmp:rw,noexec,nosuid \
+  psyb0t/stealthy-auto-browse:latest
+```
+
+Notes on the hardening flags:
+
+- `HTTP_LISTEN_HOST=0.0.0.0` makes the API reachable inside the container on all interfaces, but the `-p 127.0.0.1:8080:8080` mapping confines it to host loopback. This is the correct combination.
+- The embedded Firefox sandbox needs `SYS_ADMIN`; `--cap-drop=ALL` drops everything else.
+- Adjust `--read-only` if you need `/userdata` mounted (you'll have to mount that path writable).
+- Same applies to `/recordings` if you use screen recording. Mount it writable, which means dropping or adjusting `--read-only` for that path too.
+- Dynamic virtual-media uploads also need a writable `VIRTUAL_MEDIA_DIR`; static virtual media may remain read-only.
+
+## Environment variables
+
+| Variable | Default | What it does |
+|----------|---------|-------------|
+| `XVFB_RESOLUTION` | `1920x1080` | Virtual display resolution. Any size works (e.g. `1920x1920`, `2560x1440`); the framebuffer is allocated to match, so screen recording captures this exact size. Larger = more memory. |
+| `XVFB_DEPTH` | `24` | Color depth (16/24/32). |
+| `TZ` | `UTC` | Match your IP location for realistic test fingerprints. |
+| `PROXY_URL` | unset | Proxy for all browser traffic: `http://user:pass@host:port` or `socks5://host:port`. **Camoufox (Firefox) does not reliably support authenticated SOCKS5**, so use HTTP for any credentialed exit (unauthenticated SOCKS5 is fine). Only use exits you own or are authorized to use. [pr0xteus](https://github.com/psyb0t/pr0xteus) v0.11.0+ hands out an authenticated HTTP forward-proxy per lease (read `proxies.http`); reach it over the host network or a published address. |
+| `LOADERS_DIR` | `/loaders` | Directory for page loader YAML files. |
+| `USE_VIEWPORT` | `false` | Playwright viewport control. Required for width < ~450px. Makes automation easier to fingerprint. |
+| `HTTP_LISTEN_HOST` | `0.0.0.0` | HTTP API bind address inside the container. Combine with a `127.0.0.1:8080:8080` port mapping to confine to localhost on the host. |
+| `HTTP_LISTEN_PORT` | `8080` | HTTP API port. |
+| `AUTH_TOKEN` | unset | **Set this for any non-trivial deployment.** Without it, anyone who can reach the port can control the browser. With it, requests need an `Authorization: Bearer <key>` header. |
+| `VIRTUAL_MEDIA_DIR` | `/media` | Directory containing virtual camera/microphone media. Configured and dynamic source paths must resolve within it. Mount it read-only for static sources; dynamic uploads require it to be writable. |
+| `VIRTUAL_CAMERA_FILE` | unset | Video file returned as the video track from page `getUserMedia()`. Relative to `VIRTUAL_MEDIA_DIR` or an absolute path inside it. A request for video without this source fails with `NotFoundError`. |
+| `VIRTUAL_MICROPHONE_FILE` | unset | Audio file returned as the audio track from page `getUserMedia()`. Relative to `VIRTUAL_MEDIA_DIR` or an absolute path inside it. A request for audio without this source fails with `NotFoundError`. |
+| `VIRTUAL_MEDIA_DYNAMIC` | `false` | Enables runtime file-backed source selection and upload for virtual camera/microphone tests. |
+| `VIRTUAL_MEDIA_UPLOAD_MAX_BYTES` | `50 MiB` | Maximum decoded upload size accepted by `upload_virtual_media` in dynamic mode. |
+| `VNC_LISTEN_HOST` | `0.0.0.0` | VNC bind address inside the container. As above, prefer a `127.0.0.1:5900:5900` host port mapping. |
+| `VNC_LISTEN_PORT` | `5900` | noVNC web viewer port. **The viewer has no authentication of its own**, so only publish to localhost. |
+| `VNC_SHOW_CURSOR` | `true` | Shows the actual automated pointer position in noVNC. Set to `false` to hide it. Only `true` and `false` are accepted. |
+| `PUID` | `1000` | Run the container as this UID. At startup the container fixes ownership of `/userdata`, `/loaders`, `/recordings` to match. |
+| `PGID` | value of `PUID` | Run the container as this GID. |
+| `LANG` | `en_US.UTF-8` | Browser locale/language. |
+| `LOG_LEVEL` | `INFO` | One of `DEBUG`, `INFO`, `WARNING`, `ERROR` for the JSON logger. |
+| `LOG_FILE` | unset | If set, also write JSON logs to this file (10MB x 5 rotation) in addition to stderr. |
+
+## Common configurations
+
+```bash
+# Match timezone for realistic fingerprint during testing
+docker run -d -p 127.0.0.1:8080:8080 \
+  -e TZ=Europe/Bucharest \
+  --env-file .env.browser \
+  psyb0t/stealthy-auto-browse:latest
+
+# Route through your authorized proxy
+docker run -d -p 127.0.0.1:8080:8080 \
+  -e PROXY_URL=http://user:pass@proxy.you-own.example:8888 \
+  --env-file .env.browser \
+  psyb0t/stealthy-auto-browse:latest
+
+# For a private pr0xteus (v0.11.0+) HTTP proxy, allocate a lease, read its
+# proxies.http URL, and pass that as PROXY_URL (Camoufox can't reliably do authenticated SOCKS5).
+# The working allocation-to-browser command sequence is in docs/configuration.md.
+
+# Custom resolution
+docker run -d -p 127.0.0.1:8080:8080 \
+  -e XVFB_RESOLUTION=1280x720 \
+  --env-file .env.browser \
+  psyb0t/stealthy-auto-browse:latest
+
+# Persistent profile: TEST ACCOUNTS ONLY, shred when done
+mkdir -p ./profile && chmod 700 ./profile
+docker run -d -p 127.0.0.1:8080:8080 \
+  -v ./profile:/userdata \
+  --env-file .env.browser \
+  psyb0t/stealthy-auto-browse:latest
+# When the test run ends:
+docker rm -f browser && rm -rf ./profile
+
+# Custom listen ports
+docker run -d -p 127.0.0.1:9090:9090 -p 127.0.0.1:6900:6900 \
+  -e HTTP_LISTEN_PORT=9090 -e VNC_LISTEN_PORT=6900 \
+  --env-file .env.browser \
+  psyb0t/stealthy-auto-browse:latest
+
+# With page loaders
+docker run -d -p 127.0.0.1:8080:8080 \
+  -v ./my-loaders:/loaders \
+  --env-file .env.browser \
+  psyb0t/stealthy-auto-browse:latest
+
+# With screen recording. /recordings must be mounted writable or
+# start_recording fails fast
+mkdir -p ./recordings
+docker run -d -p 127.0.0.1:8080:8080 \
+  -v ./recordings:/recordings \
+  --env-file .env.browser \
+  psyb0t/stealthy-auto-browse:latest
+
+# File-backed virtual camera and microphone for an authorized WebRTC test
+mkdir -p ./media
+docker run -d -p 127.0.0.1:8080:8080 \
+  -v ./media:/media:ro \
+  -e VIRTUAL_CAMERA_FILE=camera.webm \
+  -e VIRTUAL_MICROPHONE_FILE=microphone.wav \
+  --env-file .env.browser \
+  psyb0t/stealthy-auto-browse:latest
+
+# Dynamic file-backed media for an authorized compatibility test.
+# The media mount must be writable only when uploads are needed.
+docker run -d -p 127.0.0.1:8080:8080 \
+  -v ./media:/media:rw \
+  -e VIRTUAL_MEDIA_DYNAMIC=true \
+  --env-file .env.browser \
+  psyb0t/stealthy-auto-browse:latest
+```
+
+With `VIRTUAL_MEDIA_DYNAMIC=true`, use authenticated `set_virtual_media_source`
+requests to choose an existing relative source name under `VIRTUAL_MEDIA_DIR`, or
+authenticated `upload_virtual_media` requests to store bounded base64 content and
+optionally activate it. `kind` is `"camera"` or `"microphone"`; an upload filename
+must be a safe basename with a declared media type matching that kind. It supplies
+only the extension: the service generates and returns a collision-safe stored basename
+and never overwrites a named source. Decoded uploads are checked with `ffprobe` for
+the requested video or audio stream before storage or activation. Uploads are capped
+by `VIRTUAL_MEDIA_UPLOAD_MAX_BYTES` (50 MiB by default). A source switch preserves
+the tracks that a page already received from `getUserMedia()`.
+
+Only regular files contained by `VIRTUAL_MEDIA_DIR` are accepted. Dynamic mode does
+not accept arbitrary host paths, remote URLs, WebSocket streams, or other live
+ingress. When `AUTH_TOKEN` is set, send the same `Authorization: Bearer <key>` header
+used for every other action.
+
+## OpenClaw / ClawHub config
+
+```bash
+export STEALTHY_AUTO_BROWSE_URL=http://127.0.0.1:8080
+export AUTH_TOKEN=$(cat .env.browser | grep AUTH_TOKEN | cut -d= -f2)
+```
+
+Or via `~/.openclaw/openclaw.json`:
+
+```json
+{
+  "skills": {
+    "entries": {
+      "stealthy-auto-browse": {
+        "env": {
+          "STEALTHY_AUTO_BROWSE_URL": "http://127.0.0.1:8080",
+          "AUTH_TOKEN": "your-token-here"
+        }
+      }
+    }
+  }
+}
+```
+
+Keep `~/.openclaw/openclaw.json` mode `600` if it contains real tokens, or read the token from a separate file the config refers to.
+
+## Cluster mode setup
+
+Run multiple browser instances behind HAProxy with request queuing, sticky sessions, and Redis cookie sync. `NUM_REPLICAS` sets the number of instances (default: 10).
+
+Download the compose file and read it before you start it. Don't pipe it straight into `docker compose`:
+
+```bash
+# Download to a local file.
+curl -fsSL -o docker-compose.cluster.yml \
+  "https://raw.githubusercontent.com/psyb0t/docker-stealthy-auto-browse/main/docker-compose.cluster.yml"
+
+# Read it. Confirm the images, networks, and volume mounts match what you expect.
+$EDITOR docker-compose.cluster.yml
+
+docker compose -f docker-compose.cluster.yml up -d
+```
+
+Entry point is `http://127.0.0.1:8080`, with the same API and MCP endpoint as single-container mode. Bind HAProxy's published port to `127.0.0.1` in the compose file unless you have a deliberate reason for broader exposure.
+
+Set `STEALTHY_AUTO_BROWSE_URL=http://127.0.0.1:8080` and `AUTH_TOKEN=...` as usual.
+
+## Pre-installed extensions
+
+- **uBlock Origin**: ad/tracker blocking
+- **LocalCDN**: serves CDN resources locally
+- **ClearURLs**: strips tracking parameters
+- **Consent-O-Matic**: auto-handles cookie popups
+
+## Tear-down
+
+When a test run is done:
+
+```bash
+docker rm -f browser           # stop + remove the container
+rm -rf ./profile               # shred persisted session data if you mounted /userdata
+rm -f .env.browser             # rotate / remove the AUTH_TOKEN file
+```
+
+If humans also use the test accounts the run exercised, rotate their credentials.

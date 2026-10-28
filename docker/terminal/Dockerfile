@@ -29,13 +29,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN curl -fsSL https://bun.sh/install | bash \
     && curl -LsSf https://astral.sh/uv/install.sh | sh
 
-# 3. Install pinned Claude Code CLI, Playwright MCP, and CloakBrowser MCP humanize bridge globally
-RUN npm install -g \
-    @anthropic-ai/claude-code@2.1.312 \
-    @playwright/mcp@0.0.83 \
-    playwright-core \
-    cloakbrowser@0.6.3 \
-    cloakbrowser-mcp@1.15.1
+# 3. Install pinned Claude Code CLI globally
+RUN npm install -g @anthropic-ai/claude-code@2.1.312
 
 # 4. Install JobPilot Terminal Host binary + bundled plugin/ outside the /root/.jobpilot volume
 # so container image upgrades never get shadowed by the persistent terminal-data volume.
@@ -56,7 +51,10 @@ RUN npm ci
 COPY mcp/jobbot-mcp/src ./src
 RUN npm run build
 
-# 7. Copy container entrypoint
+# 7. Copy custom packaged skills (stealthy-auto-browse) into bundled plugin tree
+COPY skills/ /opt/jobpilot-dist/plugin/skills/
+
+# 8. Copy container entrypoint
 COPY docker/terminal/entrypoint.sh /usr/local/bin/terminal-entrypoint.sh
 RUN sed -i 's/\r$//' /usr/local/bin/terminal-entrypoint.sh \
     && chmod +x /usr/local/bin/terminal-entrypoint.sh \

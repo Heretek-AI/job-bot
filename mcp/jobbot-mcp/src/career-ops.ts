@@ -5,8 +5,7 @@ import { chromium } from "playwright-core";
 let pdfCompileQueue: Promise<unknown> = Promise.resolve();
 
 /**
- * Serializes PDF compilation operations over the shared CloakBrowser CDP instance
- * so concurrent invocations do not contend on CDP contexts.
+ * Serializes PDF compilation operations so concurrent invocations do not contend.
  */
 function withPdfMutex<T>(fn: () => Promise<T>): Promise<T> {
   const next = pdfCompileQueue.then(fn, fn);
@@ -19,19 +18,16 @@ function withPdfMutex<T>(fn: () => Promise<T>): Promise<T> {
 
 /**
  * Compiles an ATS-clean HTML or Markdown resume into a single-page PDF using
- * Career-Ops's styling conventions and our CloakBrowser Chromium CDP server.
+ * Career-Ops's styling conventions via local headless Chromium or an optional CDP endpoint.
  */
-export async function compileAtsPdfViaCloakBrowser(params: {
+export async function compileAtsPdf(params: {
   htmlContent: string;
   outputFilename: string;
   cdpUrl?: string;
   outputDir?: string;
 }): Promise<{ pdfPath: string; bytes: number }> {
   return withPdfMutex(async () => {
-    const cdpUrl =
-      params.cdpUrl ||
-      process.env.CLOAKBROWSER_CDP_URL ||
-      "http://cloakbrowser:9222";
+    const cdpUrl = params.cdpUrl || process.env.CDP_URL || process.env.CLOAKBROWSER_CDP_URL;
     const outputDir =
       params.outputDir ||
       process.env.SHARED_RESUMES_DIR ||
@@ -74,7 +70,18 @@ ${params.htmlContent}
 </body>
 </html>`;
 
-    const browser = await chromium.connectOverCDP(cdpUrl, { timeout: 15_000 });
+    let browser;
+    let shouldCloseBrowser = false;
+    if (cdpUrl) {
+      browser = await chromium.connectOverCDP(cdpUrl, { timeout: 15_000 });
+    } else {
+      browser = await chromium.launch({
+        headless: true,
+        args: ["--no-sandbox", "--disable-setuid-sandbox"],
+      });
+      shouldCloseBrowser = true;
+    }
+
     const context = await browser.newContext();
     try {
       const page = await context.newPage();
@@ -97,6 +104,11 @@ ${params.htmlContent}
       return { pdfPath, bytes: pdfBuffer.byteLength };
     } finally {
       await context.close().catch(() => undefined);
+      if (shouldCloseBrowser) {
+        await browser.close().catch(() => undefined);
+      }
     }
   });
 }
+
+export const compileAtsPdfViaCloakBrowser = compileAtsPdf;

@@ -213,7 +213,7 @@ server.tool(
 // 6. Layer 2 CAPTCHA Token Solver Fallback
 server.tool(
   "solve_captcha_challenge",
-  "Solves a reCAPTCHA v2/v3, hCaptcha, or Cloudflare Turnstile challenge via CapSolver/2Captcha token service if CloakBrowser C++ stealth checkbox click triggers an image challenge.",
+  "Solves a reCAPTCHA v2/v3, hCaptcha, or Cloudflare Turnstile challenge via CapSolver/2Captcha token service if stealth browser checkbox click triggers an image challenge.",
   {
     pageUrl: z
       .string()
@@ -249,7 +249,7 @@ server.tool(
 // 7. Career-Ops ATS-Clean HTML-to-PDF Resume Compiler
 server.tool(
   "career_ops_compile_pdf",
-  "Compiles tailored resume HTML into an ATS-friendly single-page PDF in /app/shared/resumes using the CloakBrowser Chromium CDP instance.",
+  "Compiles tailored resume HTML into an ATS-friendly single-page PDF in /app/shared/resumes using headless Chromium or an optional CDP instance.",
   {
     htmlContent: z
       .string()

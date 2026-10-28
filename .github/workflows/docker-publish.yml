@@ -72,9 +72,6 @@ jobs:
           - name: web
             context: ./docker/web
             dockerfile: ./docker/web/Dockerfile
-          - name: cloakbrowser
-            context: ./docker/cloakbrowser
-            dockerfile: ./docker/cloakbrowser/Dockerfile
           - name: terminal
             context: .
             dockerfile: ./docker/terminal/Dockerfile
