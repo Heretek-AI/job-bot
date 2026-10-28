@@ -14,7 +14,8 @@ PINNED_JOBPILOT_COMMIT = "08fa978ecac0da68b0ee5694c93c0d94f18b4d9f"
 def patch_terminal_source(src: str) -> str:
     """
     Replaces the static NEXT_PUBLIC_TERMINAL_URL and TERMINAL_WS_URL declarations
-    in apps/web/src/lib/terminal.ts with dynamic window.location.origin resolution.
+    in apps/web/src/lib/terminal.ts with dynamic window.location.origin resolution,
+    and normalizes skill names in formatSkillCommand (e.g. auto_apply -> auto-apply).
     """
     pattern = re.compile(
         r'const\s+TERMINAL_HTTP_URL\s*=\s*process\.env\.NEXT_PUBLIC_TERMINAL_URL\s*\?\?\s*"http://localhost:4102";\s*'
@@ -33,21 +34,45 @@ def patch_terminal_source(src: str) -> str:
         '    : `${TERMINAL_HTTP_URL.replace(/^http/, "ws")}/ws`;'
     )
 
-    if '`${window.location.origin}/terminal`' in src:
+    if '`${window.location.origin}/terminal`' not in src:
+        if not pattern.search(src):
+            raise RuntimeError(
+                "Could not locate expected TERMINAL_HTTP_URL / TERMINAL_WS_URL block in apps/web/src/lib/terminal.ts."
+            )
+        src = pattern.sub(replacement, src, count=1)
+
+    # Ensure skill names like auto_apply are normalized to auto-apply in formatSkillCommand
+    target_cmd = 'const command = provider === "codex" ? `$${skill}` : `/jobpilot:${skill}`;'
+    skill_cmd_replacement = (
+        'const normalizedSkill = skill.replace(/_/g, "-");\n'
+        '  const command = provider === "codex" ? `$${normalizedSkill}` : `/jobpilot:${normalizedSkill}`;'
+    )
+    if 'normalizedSkill' not in src:
+        if target_cmd in src:
+            src = src.replace(target_cmd, skill_cmd_replacement, 1)
+        else:
+            raise RuntimeError("Could not locate expected formatSkillCommand line in apps/web/src/lib/terminal.ts.")
+
+    return src
+
+
+def patch_composer_source(src: str) -> str:
+    """
+    Normalizes campaign mode 'auto_apply' to 'auto-apply' when injecting skill from campaign-composer.tsx.
+    """
+    target = 'upwork ? "upwork-search" : effective.mode,'
+    replacement = 'upwork ? "upwork-search" : (effective.mode === "auto_apply" ? "auto-apply" : effective.mode),'
+    if replacement in src:
         return src
-
-    if not pattern.search(src):
-        raise RuntimeError(
-            "Could not locate expected TERMINAL_HTTP_URL / TERMINAL_WS_URL block in apps/web/src/lib/terminal.ts."
-        )
-
-    return pattern.sub(replacement, src, count=1)
+    if target not in src:
+        raise RuntimeError("Could not locate expected injectSkill mode argument in campaign-composer.tsx.")
+    return src.replace(target, replacement, 1)
 
 
 def apply_patches(app_root: str = "/app", dry_run: bool = False) -> None:
     """
-    Applies the dynamic origin patches to apps/web/src/api/base-url.ts and
-    apps/web/src/lib/terminal.ts, or validates against the pinned upstream commit when dry_run=True.
+    Applies the dynamic origin patches and skill normalization to apps/web,
+    or validates against the pinned upstream commit when dry_run=True.
     """
     base_url_content = """export const API_BASE_URL =
   typeof window !== "undefined"
@@ -61,16 +86,29 @@ export const API_ORIGIN =
 """
 
     if dry_run:
-        u = f"https://raw.githubusercontent.com/suxrobGM/jobpilot/{PINNED_JOBPILOT_COMMIT}/apps/web/src/lib/terminal.ts"
-        req = urllib.request.Request(u, headers={"User-Agent": "Mozilla/5.0"})
-        src = (
+        u_term = f"https://raw.githubusercontent.com/suxrobGM/jobpilot/{PINNED_JOBPILOT_COMMIT}/apps/web/src/lib/terminal.ts"
+        req = urllib.request.Request(u_term, headers={"User-Agent": "Mozilla/5.0"})
+        src_term = (
             urllib.request.urlopen(req, timeout=10)
             .read()
             .decode("utf-8")
             .replace("\r\n", "\n")
         )
-        patched = patch_terminal_source(src)
-        assert "`${window.location.origin}/terminal`" in patched
+        patched_term = patch_terminal_source(src_term)
+        assert "`${window.location.origin}/terminal`" in patched_term
+        assert "normalizedSkill" in patched_term
+
+        u_comp = f"https://raw.githubusercontent.com/suxrobGM/jobpilot/{PINNED_JOBPILOT_COMMIT}/apps/web/src/components/features/campaigns/composer/campaign-composer.tsx"
+        req2 = urllib.request.Request(u_comp, headers={"User-Agent": "Mozilla/5.0"})
+        src_comp = (
+            urllib.request.urlopen(req2, timeout=10)
+            .read()
+            .decode("utf-8")
+            .replace("\r\n", "\n")
+        )
+        patched_comp = patch_composer_source(src_comp)
+        assert "auto-apply" in patched_comp
+
         print(
             f"Dry-run verified: patch-origin.py matches suxrobGM/jobpilot@{PINNED_JOBPILOT_COMMIT[:8]} 100%."
         )
@@ -88,7 +126,15 @@ export const API_ORIGIN =
     with open(terminal_path, "w", encoding="utf-8") as f:
         f.write(patched)
 
-    print("Successfully patched base-url.ts and terminal.ts for dynamic origin resolution.")
+    composer_path = f"{app_root}/apps/web/src/components/features/campaigns/composer/campaign-composer.tsx"
+    with open(composer_path, "r", encoding="utf-8") as f:
+        src_comp = f.read().replace("\r\n", "\n")
+
+    patched_c = patch_composer_source(src_comp)
+    with open(composer_path, "w", encoding="utf-8") as f:
+        f.write(patched_c)
+
+    print("Successfully patched base-url.ts, terminal.ts, and campaign-composer.tsx for dynamic origin & skill normalization.")
 
 
 if __name__ == "__main__":

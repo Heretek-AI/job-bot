@@ -17,6 +17,54 @@ if [ -d "${DIST_DIR}" ]; then
   cp -R "${DIST_DIR}/plugin" "${INSTALL_DIR}/plugin"
 fi
 
+# Ensure both hyphen and underscore slash commands exist for Claude Code (e.g. /jobpilot:auto_apply and /jobpilot:auto-apply)
+python3 - <<'PY'
+import os, re
+
+install_dir = os.environ.get("JOBPILOT_INSTALL_DIR", "/root/.jobpilot")
+skills_dir = os.path.join(install_dir, "plugin", "skills")
+
+if os.path.isdir(skills_dir):
+    for entry in list(os.listdir(skills_dir)):
+        src_path = os.path.join(skills_dir, entry)
+        if not os.path.isdir(src_path) or entry.startswith("_"):
+            continue
+
+        alias_names = []
+        if "-" in entry:
+            alias_names.append(entry.replace("-", "_"))
+        if "_" in entry:
+            alias_names.append(entry.replace("_", "-"))
+
+        for alias_name in alias_names:
+            alias_dir = os.path.join(skills_dir, alias_name)
+            if not os.path.exists(alias_dir):
+                os.makedirs(alias_dir, exist_ok=True)
+                skill_md = os.path.join(src_path, "SKILL.md")
+                if os.path.isfile(skill_md):
+                    with open(skill_md, "r", encoding="utf-8") as f:
+                        content = f.read()
+                    aliased_content = re.sub(
+                        r"^(name:\s*)" + re.escape(entry) + r"\b",
+                        r"\g<1>" + alias_name,
+                        content,
+                        flags=re.MULTILINE
+                    )
+                    with open(os.path.join(alias_dir, "SKILL.md"), "w", encoding="utf-8") as f:
+                        f.write(aliased_content)
+                for sub in os.listdir(src_path):
+                    if sub == "SKILL.md":
+                        continue
+                    sub_src = os.path.join(src_path, sub)
+                    sub_dst = os.path.join(alias_dir, sub)
+                    if not os.path.exists(sub_dst):
+                        try:
+                            os.symlink(sub_src, sub_dst)
+                        except Exception:
+                            pass
+                print(f"[terminal] Created skill alias: {entry} -> {alias_name}")
+PY
+
 # Ensure ATS_VAULT_MASTER_SECRET is at least 32 characters (auto-generate & persist if left at placeholder/unset)
 VAULT_SECRET_FILE="${INSTALL_DIR}/.vault_master_secret"
 if [ -z "${ATS_VAULT_MASTER_SECRET:-}" ] || [ "${#ATS_VAULT_MASTER_SECRET}" -lt 32 ] || [[ "${ATS_VAULT_MASTER_SECRET}" == *"change_this"* ]] || [[ "${ATS_VAULT_MASTER_SECRET}" == *"REPLACE_"* ]]; then
