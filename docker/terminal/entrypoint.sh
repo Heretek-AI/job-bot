@@ -242,8 +242,17 @@ mcp_servers = {
             "--cdp-endpoint",
             cdp_url,
             "--snapshot-mode",
-            "none"
-        ]
+            "none",
+            *(
+                ["--init-page", "/usr/lib/node_modules/cloakbrowser-mcp/dist/runtime/humanize-init-page.cjs"]
+                if os.path.exists("/usr/lib/node_modules/cloakbrowser-mcp/dist/runtime/humanize-init-page.cjs")
+                else []
+            ),
+        ],
+        "env": {
+            "CLOAK_PLAYWRIGHT_MCP_HUMANIZE": os.environ.get("CLOAK_PLAYWRIGHT_MCP_HUMANIZE", "true"),
+            "CLOAK_PLAYWRIGHT_MCP_HUMAN_PRESET": os.environ.get("CLOAK_PLAYWRIGHT_MCP_HUMAN_PRESET", "default"),
+        },
     },
     "jobbot-mcp": {
         "command": "node",

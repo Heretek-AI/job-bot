@@ -29,8 +29,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN curl -fsSL https://bun.sh/install | bash \
     && curl -LsSf https://astral.sh/uv/install.sh | sh
 
-# 3. Install pinned Claude Code CLI & Playwright MCP globally
-RUN npm install -g @anthropic-ai/claude-code@2.1.312 @playwright/mcp@0.0.83
+# 3. Install pinned Claude Code CLI, Playwright MCP, and CloakBrowser MCP humanize bridge globally
+RUN npm install -g \
+    @anthropic-ai/claude-code@2.1.312 \
+    @playwright/mcp@0.0.83 \
+    playwright-core \
+    cloakbrowser@0.6.3 \
+    cloakbrowser-mcp@1.15.1
 
 # 4. Install JobPilot Terminal Host binary + bundled plugin/ outside the /root/.jobpilot volume
 # so container image upgrades never get shadowed by the persistent terminal-data volume.
