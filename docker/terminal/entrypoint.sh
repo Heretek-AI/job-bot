@@ -150,6 +150,8 @@ for target_path, default_root in (
         "Task",
         "Skill",
         "NotebookEdit",
+        "mcp__playwright__*",
+        "mcp__plugin_jobpilot_playwright__*",
         "mcp__stealthy-auto-browse__*",
         "mcp__plugin_jobpilot_stealthy-auto-browse__*",
         "mcp__jobbot-mcp__*",
@@ -198,7 +200,7 @@ proj = projects.get(install_dir)
 if not isinstance(proj, dict):
     proj = {}
 proj["hasTrustDialogAccepted"] = True
-proj["enabledMcpjsonServers"] = ["stealthy-auto-browse", "jobbot-mcp"]
+proj["enabledMcpjsonServers"] = ["playwright", "stealthy-auto-browse", "jobbot-mcp"]
 projects[install_dir] = proj
 state["projects"] = projects
 
@@ -236,6 +238,13 @@ if os.environ.get("JOBPILOT_API_TOKEN", "").strip():
     mcp_env["JOBPILOT_API_TOKEN"] = os.environ["JOBPILOT_API_TOKEN"].strip()
 
 mcp_servers = {
+    "playwright": {
+        "command": "node",
+        "args": ["/opt/jobbot-mcp/dist/playwright-bridge.js"],
+        "env": {
+            "STEALTH_BROWSER_URL": stealth_url
+        }
+    },
     "stealthy-auto-browse": {
         "type": "http",
         "url": f"{stealth_url}/mcp",
@@ -397,6 +406,51 @@ EOF
 chmod +x /root/.local/bin/claude
 cp -f /root/.local/bin/claude /usr/bin/claude
 chmod +x /usr/bin/claude
+
+# 8. Background auto-arm watcher: Once Kestrel is up on :4102, ensure the Pilot is re-armed if paired or JOBPILOT_API_TOKEN is set
+python3 - <<'PY' &
+import json, os, time, urllib.request
+
+time.sleep(2)
+api_token = os.environ.get("JOBPILOT_API_TOKEN", "").strip()
+install_dir = os.environ.get("JOBPILOT_INSTALL_DIR", "/root/.jobpilot")
+pilot_json_path = os.path.join(install_dir, "pilot.json")
+
+for _ in range(45):
+    try:
+        with urllib.request.urlopen("http://127.0.0.1:4102/healthz", timeout=2) as r:
+            if r.status == 200:
+                break
+    except Exception:
+        pass
+    time.sleep(1)
+
+if not api_token and os.path.exists(pilot_json_path):
+    try:
+        with open(pilot_json_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            api_token = data.get("apiToken", "").strip()
+    except Exception:
+        pass
+
+if api_token:
+    req_body = json.dumps({
+        "provider": "claude",
+        "apiToken": api_token,
+        "apiUrl": os.environ.get("JOBPILOT_API", "http://api:4101"),
+        "webUrl": os.environ.get("JOBPILOT_WEB", "http://web:4100"),
+    }).encode("utf-8")
+    try:
+        req = urllib.request.Request(
+            "http://127.0.0.1:4102/pilot/start",
+            data=req_body,
+            headers={"Content-Type": "application/json"}
+        )
+        with urllib.request.urlopen(req, timeout=5) as r:
+            print(f"[terminal] Auto-armed Pilot loop on http://127.0.0.1:4102/pilot/start (status {r.status})")
+    except Exception as e:
+        print(f"[terminal] Auto-arm Pilot note: {e}")
+PY
 
 echo "[terminal] Launching JobPilot Terminal Host on 0.0.0.0:4102..."
 export DOTNET_EnableWriteXorExecute=0
