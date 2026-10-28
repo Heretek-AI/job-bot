@@ -1,3 +1,6 @@
+import fs from "node:fs";
+import fsPromises from "node:fs/promises";
+import path from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
@@ -40,6 +43,16 @@ const server = new McpServer({
   version: "1.0.0",
 });
 
+// Helper to resolve selector from ref or selector
+function resolveSelector(selector?: string, ref?: string, defaultSelector = ""): string {
+  if (selector && selector.trim()) return selector.trim();
+  if (ref && ref.trim()) {
+    // If ref looks like a number or id
+    return `[data-ref="${ref.trim()}"]`;
+  }
+  return defaultSelector;
+}
+
 // 1. browser_navigate
 server.tool(
   "browser_navigate",
@@ -61,9 +74,16 @@ server.tool(
 server.tool(
   "browser_click",
   "Click an element on the page using a CSS or text selector",
-  { selector: z.string().describe("CSS selector or text selector") },
-  async ({ selector }) => {
-    const res = await callStealth("click", { selector });
+  {
+    selector: z.string().optional().describe("CSS selector or text selector"),
+    ref: z.string().optional().describe("Element reference from snapshot"),
+  },
+  async ({ selector, ref }) => {
+    const targetSelector = resolveSelector(selector, ref);
+    if (!targetSelector) {
+      return { content: [{ type: "text", text: "selector or ref is required" }], isError: true };
+    }
+    const res = await callStealth("click", { selector: targetSelector });
     return {
       content: [{ type: "text", text: JSON.stringify(res, null, 2) }],
       isError: !res.success,
@@ -76,11 +96,16 @@ server.tool(
   "browser_fill",
   "Fill an input field with text",
   {
-    selector: z.string().describe("CSS selector for input"),
+    selector: z.string().optional().describe("CSS selector for input"),
+    ref: z.string().optional().describe("Element reference from snapshot"),
     value: z.string().describe("Text value to fill"),
   },
-  async ({ selector, value }) => {
-    const res = await callStealth("fill", { selector, value });
+  async ({ selector, ref, value }) => {
+    const targetSelector = resolveSelector(selector, ref);
+    if (!targetSelector) {
+      return { content: [{ type: "text", text: "selector or ref is required" }], isError: true };
+    }
+    const res = await callStealth("fill", { selector: targetSelector, value });
     return {
       content: [{ type: "text", text: JSON.stringify(res, null, 2) }],
       isError: !res.success,
@@ -88,18 +113,191 @@ server.tool(
   }
 );
 
-// 4. browser_snapshot
+// 4. browser_type
+server.tool(
+  "browser_type",
+  "Type text into an element with human-like key events",
+  {
+    text: z.string().describe("Text to type"),
+    selector: z.string().optional().describe("CSS selector for input"),
+    ref: z.string().optional().describe("Element reference from snapshot"),
+    delay: z.number().optional().describe("Delay between keystrokes in seconds"),
+  },
+  async ({ text, selector, ref, delay }) => {
+    const targetSelector = resolveSelector(selector, ref);
+    let res: StealthResponse;
+    if (targetSelector) {
+      res = await callStealth("type", { selector: targetSelector, text, delay: delay ?? 0.05 });
+    } else {
+      res = await callStealth("system_type", { text });
+    }
+    return {
+      content: [{ type: "text", text: JSON.stringify(res, null, 2) }],
+      isError: !res.success,
+    };
+  }
+);
+
+// 5. browser_fill_form
+server.tool(
+  "browser_fill_form",
+  "Fill multiple form fields sequentially",
+  {
+    fields: z.array(
+      z.object({
+        selector: z.string().optional(),
+        ref: z.string().optional(),
+        value: z.string(),
+      })
+    ).describe("Array of fields to fill"),
+  },
+  async ({ fields }) => {
+    const results = [];
+    for (const f of fields) {
+      const targetSelector = resolveSelector(f.selector, f.ref);
+      if (targetSelector) {
+        const res = await callStealth("fill", { selector: targetSelector, value: f.value });
+        results.push({ field: targetSelector, res });
+      }
+    }
+    return {
+      content: [{ type: "text", text: JSON.stringify(results, null, 2) }],
+      isError: false,
+    };
+  }
+);
+
+// 6. browser_file_upload
+server.tool(
+  "browser_file_upload",
+  "Upload one or more files to a file input element",
+  {
+    paths: z.array(z.string()).optional().describe("Array of file paths to upload"),
+    path: z.string().optional().describe("Single file path to upload"),
+    file_path: z.string().optional().describe("Alternative single file path to upload"),
+    selector: z.string().optional().describe("CSS selector for file input (defaults to input[type='file'])"),
+    ref: z.string().optional().describe("Element reference from snapshot"),
+  },
+  async ({ paths, path: singlePath, file_path, selector, ref }) => {
+    let targetFile = (paths && paths.length > 0 ? paths[0] : (singlePath || file_path)) || "";
+    if (!targetFile) {
+      return { content: [{ type: "text", text: "No file path provided to upload" }], isError: true };
+    }
+
+    // Ensure the file is also duplicated into /app/shared/tmp/ as a shared volume fallback
+    try {
+      if (fs.existsSync(targetFile)) {
+        const sharedTmpDir = "/app/shared/tmp";
+        await fsPromises.mkdir(sharedTmpDir, { recursive: true });
+        const sharedDest = path.join(sharedTmpDir, path.basename(targetFile));
+        await fsPromises.copyFile(targetFile, sharedDest);
+        // If target file was in a local scratch path not starting with /app or /root, point to shared
+        if (!targetFile.startsWith("/root/.jobpilot") && !targetFile.startsWith("/app/")) {
+          targetFile = sharedDest;
+        }
+      }
+    } catch {
+      // Non-fatal, continue with original path
+    }
+
+    const targetSelector = resolveSelector(selector, ref, "input[type='file']");
+    const res = await callStealth("upload_file", {
+      selector: targetSelector,
+      file_path: targetFile,
+    });
+
+    return {
+      content: [{ type: "text", text: JSON.stringify(res, null, 2) }],
+      isError: !res.success,
+    };
+  }
+);
+
+// 7. upload_file (alias directly matching stealthy-auto-browse action)
+server.tool(
+  "upload_file",
+  "Upload a file into a file input element in stealth-browser",
+  {
+    file_path: z.string().describe("Path to the file on disk"),
+    selector: z.string().optional().default("input[type='file']").describe("CSS selector of file input"),
+  },
+  async ({ file_path, selector }) => {
+    let targetFile = file_path;
+    try {
+      if (fs.existsSync(targetFile)) {
+        const sharedTmpDir = "/app/shared/tmp";
+        await fsPromises.mkdir(sharedTmpDir, { recursive: true });
+        const sharedDest = path.join(sharedTmpDir, path.basename(targetFile));
+        await fsPromises.copyFile(targetFile, sharedDest);
+        if (!targetFile.startsWith("/root/.jobpilot") && !targetFile.startsWith("/app/")) {
+          targetFile = sharedDest;
+        }
+      }
+    } catch {
+      // Non-fatal
+    }
+
+    const res = await callStealth("upload_file", {
+      selector: selector || "input[type='file']",
+      file_path: targetFile,
+    });
+    return {
+      content: [{ type: "text", text: JSON.stringify(res, null, 2) }],
+      isError: !res.success,
+    };
+  }
+);
+
+// 8. browser_select_option
+server.tool(
+  "browser_select_option",
+  "Select an option in a dropdown element",
+  {
+    selector: z.string().optional().describe("CSS selector for select element"),
+    ref: z.string().optional().describe("Element reference from snapshot"),
+    value: z.string().optional().describe("Option value or text to select"),
+    values: z.array(z.string()).optional().describe("Array of values to select"),
+  },
+  async ({ selector, ref, value, values }) => {
+    const targetSelector = resolveSelector(selector, ref);
+    if (!targetSelector) {
+      return { content: [{ type: "text", text: "selector or ref is required" }], isError: true };
+    }
+    const chosenValue = value || (values && values[0]) || "";
+    const res = await callStealth("select", { selector: targetSelector, value: chosenValue });
+    return {
+      content: [{ type: "text", text: JSON.stringify(res, null, 2) }],
+      isError: !res.success,
+    };
+  }
+);
+
+// 9. browser_press_key
+server.tool(
+  "browser_press_key",
+  "Press a key or keyboard shortcut (e.g. Enter, Tab, Escape, Backspace)",
+  {
+    key: z.string().describe("Key or combo to press (e.g. enter, tab, ctrl+a)"),
+  },
+  async ({ key }) => {
+    const res = await callStealth("send_key", { key: key.toLowerCase() });
+    return {
+      content: [{ type: "text", text: JSON.stringify(res, null, 2) }],
+      isError: !res.success,
+    };
+  }
+);
+
+// 10. browser_snapshot
 server.tool(
   "browser_snapshot",
   "Capture interactive elements and page text structure",
   {
-    ref: z
-      .string()
-      .optional()
-      .describe("Optional element reference to narrow snapshot"),
+    ref: z.string().optional().describe("Optional element reference to narrow snapshot"),
+    interestingOnly: z.boolean().optional().describe("Filter to interactive elements only"),
   },
   async () => {
-    const res = await callStealth("get_interactive_elements");
+    const res = await callStealth("get_interactive_elements", { visible_only: true });
     return {
       content: [
         {
@@ -112,7 +310,7 @@ server.tool(
   }
 );
 
-// 5. browser_wait_for
+// 11. browser_wait_for
 server.tool(
   "browser_wait_for",
   "Wait for an element or text to appear on the page",
@@ -137,7 +335,7 @@ server.tool(
   }
 );
 
-// 6. browser_tabs
+// 12. browser_tabs
 server.tool(
   "browser_tabs",
   "Manage browser tabs (list, switch, new, close)",
@@ -166,13 +364,49 @@ server.tool(
   }
 );
 
-// 7. browser_take_screenshot
+// 13. browser_take_screenshot
 server.tool(
   "browser_take_screenshot",
   "Take a screenshot of the page or desktop",
-  {},
+  {
+    path: z.string().optional().describe("Optional path to save screenshot"),
+  },
+  async ({ path: outPath }) => {
+    const params = outPath ? { path: outPath } : {};
+    const res = await callStealth("save_screenshot", params);
+    return {
+      content: [{ type: "text", text: JSON.stringify(res, null, 2) }],
+      isError: !res.success,
+    };
+  }
+);
+
+// 14. browser_evaluate
+server.tool(
+  "browser_evaluate",
+  "Evaluate a JavaScript expression on the page",
+  {
+    expression: z.string().describe("JavaScript expression to execute"),
+  },
+  async ({ expression }) => {
+    const res = await callStealth("eval", { expression });
+    return {
+      content: [{ type: "text", text: JSON.stringify(res, null, 2) }],
+      isError: !res.success,
+    };
+  }
+);
+
+// 15. browser_resize
+server.tool(
+  "browser_resize",
+  "Check or calibrate browser display resolution",
+  {
+    width: z.number().optional(),
+    height: z.number().optional(),
+  },
   async () => {
-    const res = await callStealth("save_screenshot");
+    const res = await callStealth("get_resolution");
     return {
       content: [{ type: "text", text: JSON.stringify(res, null, 2) }],
       isError: !res.success,

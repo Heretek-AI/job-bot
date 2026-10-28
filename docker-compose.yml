@@ -183,6 +183,8 @@ services:
     volumes:
       - stealth-browser-data:/userdata
       - shared-workspace:/app/shared
+      - api-storage:/app/apps/api/storage:ro
+      - terminal-data:/root/.jobpilot:ro
     networks:
       - browser-net
       - app-net
